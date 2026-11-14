@@ -32104,10 +32104,10 @@ const DEFAULT_AGENT_RULES = [
         category: 'AI_SECURITY',
         severity: 'HIGH',
         languages: ['all'],
-        pattern: /(?:[\uD800-\uDBFF][\uDC00-\uDFFF]|[\u2600-\u27BF])/,
+        pattern: /(?:[0-9#*]\uFE0F?\u20E3|[\uD800-\uDBFF][\uDC00-\uDFFF]|[\u231A-\u23FF\u2600-\u27BF\u2B05-\u2B55]|[\u2139\u2194-\u21AA\u24C2\u25AA-\u25FE\u2934-\u2935\u3030\u303D\u3297\u3299]\uFE0F)/,
         message: 'AI agents must not use emojis or emoticons under any circumstances.',
         remediation: 'Strip all emojis from text and outputs, preserving clean technical prose.',
-        instruction: 'Do not use emojis anywhere in your responses or generated code. Never output emojis under any circumstances.'
+        instruction: 'Do not use emojis anywhere in your responses, headings, bullet points, status labels, thoughts, reasoning, tool arguments, comments, or generated code. Never output emojis under any circumstances.'
     },
     {
         id: 'wide/cwe078-ai-unsafe-tool-exec',
@@ -32477,11 +32477,22 @@ class RuleLoader {
         if (!text || typeof text !== 'string')
             return '';
         const targetRules = Array.isArray(rules) && rules.length > 0 ? rules : [...DEFAULT_AGENT_RULES];
-        let result = text;
+        let result = text
+            .replace(/(?:\p{Extended_Pictographic}|\p{Emoji_Presentation}|[\u2600-\u27BF])(?:\uFE0F|\uFE0E|[\u{1F3FB}-\u{1F3FF}])?(?:\u200D(?:\p{Extended_Pictographic}|\p{Emoji_Presentation}|[\u2600-\u27BF])(?:\uFE0F|\uFE0E|[\u{1F3FB}-\u{1F3FF}])?)+/gu, '')
+            .replace(/[0-9#*]\uFE0F?\u20E3/gu, '')
+            .replace(/[\u{1F1E6}-\u{1F1FF}\u{1F3FB}-\u{1F3FF}\u{E0020}-\u{E007F}]/gu, '')
+            .replace(/\p{Extended_Pictographic}(?:\uFE0F|\uFE0E)?/gu, '')
+            .replace(/\p{Emoji_Presentation}(?:\uFE0F|\uFE0E)?/gu, '')
+            .replace(/[\u231A-\u23FF\u2600-\u27BF\u2B05-\u2B55][\uFE0E\uFE0F]?|[\u2139\u2194-\u21AA\u24C2\u25AA-\u25FE\u2934-\u2935\u3030\u303D\u3297\u3299]\uFE0F|[\uFE0E\uFE0F\u20E3]/gu, '')
+            .replace(new RegExp('[\\uD800-\\uDFFF]', 'g'), '');
         for (const r of targetRules) {
-            if (r.id === 'wide/ai-no-emojis' || r.id.includes('emoji')) {
-                result = result.replace(/(?:[\uD800-\uDBFF][\uDC00-\uDFFF]|[\u2600-\u27BF])/g, '');
-                result = result.replace(/\p{Extended_Pictographic}/gu, '');
+            if ((r.id === 'wide/ai-no-emojis' || r.id.includes('emoji')) && r.pattern) {
+                try {
+                    const src = r.pattern.source;
+                    const flags = src.includes('\\uD800') ? 'g' : 'gu';
+                    result = result.replace(new RegExp(src, flags), '');
+                }
+                catch { }
             }
         }
         return result;

@@ -58,6 +58,10 @@ describe('Action RuleLoader', () => {
       const advisories = await RuleLoader.loadAdvisories('embedded', tmpDir);
       assert.ok(advisories && typeof advisories === 'object');
       assert.ok(Array.isArray(advisories.npm));
+
+      assert.equal(RuleLoader.sanitizeOutput('Hello 😀⭐ℹ️1️⃣👨‍💻🇷🇺 World', []), 'Hello  World');
+      assert.equal(RuleLoader.sanitizeOutput('Clean 1 + 2 -> 3', loaded), 'Clean 1 + 2 -> 3');
+      assert.equal(RuleLoader.sanitizeOutput('Leaky 🚨', loaded), 'Leaky ');
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });
     }
