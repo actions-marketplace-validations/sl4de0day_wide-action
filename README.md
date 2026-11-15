@@ -31,8 +31,10 @@ Wide Action is designed for rapid execution and seamless pull request integratio
 - **Differential Code Inspection.** Scans only added or modified lines in pull requests to eliminate legacy codebase noise and focus strictly on newly introduced changes.
 - **CI/CD Security Gate.** Enforces configurable failure thresholds (CRITICAL, HIGH, MEDIUM, LOW) to block vulnerable code before merge.
 - **Inline Review Comments.** Publishes actionable security findings directly on affected lines via the GitHub Pull Request Review API.
-- **Autonomous AI Remediation.** Employs AI models (Gemini, Claude, DeepSeek, OpenAI) to generate one-click GitHub suggested change blocks for automated developer patching.
-- **SARIF 2.1.0 Export.** Generates OASIS SARIF reports for native integration with GitHub Advanced Security and Code Scanning dashboards.
+- **Autonomous AI Remediation.** Employs AI models (Gemini, Claude, DeepSeek, OpenAI) with bounded concurrency to generate one-click GitHub suggested change blocks for automated developer patching.
+- **SARIF 2.1.0 Export.** Generates OASIS SARIF reports with sensitive credential masking for native integration with GitHub Advanced Security and Code Scanning dashboards.
+- **Verified Dynamic Rules & Feeds.** Loads dynamic rules and offline OSV advisory bundles with mandatory upstream `SHA256SUMS` verification and non-match suppression.
+- **Retry Resilience.** Native HTTP exponential backoff and rate-limit retry handling for robust CI/CD execution.
 - **Anti-Spam Deduplication.** Updates existing summary comments and tracks posted review items to prevent pull request noise across subsequent commits.
 
 ## Quick Start
