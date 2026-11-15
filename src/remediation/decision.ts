@@ -3,7 +3,7 @@ export class Criterion {
   public readonly term: (candidate: number) => number;
 
   constructor(weight: number, term: (candidate: number) => number) {
-    if (weight < 0.0) throw new RangeError("weight cannot be negative");
+    if (!Number.isFinite(weight) || weight < 0.0) throw new RangeError("weight must be finite and non-negative");
     if (!term) throw new TypeError("term cannot be null");
     this.weight = weight;
     this.term = term;
@@ -22,7 +22,7 @@ export class WeightedScorer {
       if (!c || !c.term) throw new TypeError("criterion or term cannot be null");
       m += c.weight;
     }
-    if (m <= 0.0) throw new RangeError("total weight must be positive");
+    if (!Number.isFinite(m) || m <= 0.0) throw new RangeError("total weight must be finite and positive");
     this.totalWeight = m;
   }
 
@@ -30,7 +30,7 @@ export class WeightedScorer {
     let s = 0.0;
     for (const c of this.criteria) {
       let f = c.term(candidate);
-      if (f < 0.0) f = 0.0;
+      if (!Number.isFinite(f) || f < 0.0) f = 0.0;
       else if (f > 1.0) f = 1.0;
       s += c.weight * f;
     }

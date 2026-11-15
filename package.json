@@ -1,13 +1,13 @@
 {
   "name": "wide-action",
-  "version": "0.3141126",
+  "version": "0.4151126",
   "description": "Autonomous PR Security Auditor and CI/CD Gate for the Wide Ecosystem",
   "type": "module",
   "main": "dist/index.js",
   "scripts": {
-    "build": "ncc build src/index.ts -o dist --source-map --license licenses.txt",
+    "build": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && ncc build src/index.ts -o dist --minify --license licenses.txt",
     "compile": "tsc",
-    "test": "tsc && node --test lib/test/**/*.test.js"
+    "test": "node -e \"require('node:fs').rmSync('lib', { recursive: true, force: true })\" && tsc && node --test lib/test/**/*.test.js"
   },
   "repository": {
     "type": "git",

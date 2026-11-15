@@ -1,8 +1,35 @@
-import { writeFileSync, mkdirSync } from 'node:fs';
+import { writeFileSync, readFileSync, mkdirSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import * as core from '@actions/core';
 import { SECURITY_RULES } from './engine/rules.js';
 import { SeverityLevel, VulnerabilityFinding } from './types.js';
+
+const DEFAULT_ACTION_VERSION = '0.4151126';
+
+function resolveToolVersion(): string {
+  const envVersion = process.env.npm_package_version;
+  if (envVersion) return envVersion;
+  try {
+    const pkgPath = resolve(dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '../package.json');
+    const pkg = JSON.parse(readFileSync(pkgPath, 'utf8')) as { version?: string };
+    if (pkg.version) return pkg.version;
+  } catch {}
+  return DEFAULT_ACTION_VERSION;
+}
+
+const KNOWN_SECRET_VALUE_RE = /\b(gh[pous]_[A-Za-z0-9]{10,}|github_pat_[A-Za-z0-9_]{16,}|sk-(?:ant-|proj-)?[A-Za-z0-9_-]{12,}|AKIA[0-9A-Z]{12,}|AIza[0-9A-Za-z_-]{20,}|xox[baprs]-[A-Za-z0-9-]{10,})\b/g;
+const ASSIGNED_SECRET_RE = /((?:api[_-]?key|secret|token|password|passwd|pwd|auth[_-]?token|private[_-]?key|bearer)\s*[:=]\s*['"`])([^'"`\r\n]{4,})(['"`])/gi;
+const BEARER_RE = /\b(Bearer\s+)([A-Za-z0-9._~+/-]{8,}=*)/gi;
+const URL_CREDENTIALS_RE = /([a-zA-Z][a-zA-Z0-9+.-]*:\/\/[^:\s/@]+:)([^@\s]+)(@)/g;
+
+export function maskSensitiveSnippet(text: string): string {
+  if (!text) return text;
+  return text
+    .replace(KNOWN_SECRET_VALUE_RE, '[REDACTED]')
+    .replace(ASSIGNED_SECRET_RE, '$1[REDACTED]$3')
+    .replace(BEARER_RE, '$1[REDACTED]')
+    .replace(URL_CREDENTIALS_RE, '$1[REDACTED]$3');
+}
 
 export interface SarifRule {
   id: string;
@@ -94,16 +121,20 @@ export function generateSarifReport(
   const rulesToMap = (customRules && customRules.length > 0) ? customRules : SECURITY_RULES;
 
   for (const rule of rulesToMap) {
-    const cweTag = rule.cwe.toLowerCase();
+    const rawCwe = typeof rule?.cwe === 'string' && rule.cwe.trim() ? rule.cwe.trim() : 'N/A';
+    const cweTag = rawCwe.toLowerCase();
+    const categoryText = typeof rule?.category === 'string' && rule.category.trim() ? rule.category.trim() : 'Security';
+    const messageText = typeof rule?.message === 'string' ? rule.message : '';
+    const remediationText = typeof rule?.remediation === 'string' ? rule.remediation : '';
     rulesMap.set(rule.id, {
       id: rule.id,
-      name: rule.category.replace(/[^a-zA-Z0-9]/g, ''),
-      shortDescription: { text: rule.category },
-      fullDescription: { text: rule.message },
+      name: categoryText.replace(/[^a-zA-Z0-9]/g, '') || rule.id.replace(/[^a-zA-Z0-9]/g, ''),
+      shortDescription: { text: categoryText },
+      fullDescription: { text: messageText },
       defaultConfiguration: { level: severityToSarifLevel(rule.severity) },
       help: {
-        text: `${rule.message}\nRemediation: ${rule.remediation}`,
-        markdown: `**${rule.category}** (${rule.cwe})\n\n${rule.message}\n\n### Remediation\n${rule.remediation}`
+        text: `${messageText}\nRemediation: ${remediationText}`,
+        markdown: `**${categoryText}** (${rawCwe})\n\n${messageText}\n\n### Remediation\n${remediationText}`
       },
       properties: {
         tags: ['security', 'sast', cweTag],
@@ -118,6 +149,7 @@ export function generateSarifReport(
   for (const finding of findings) {
     const normalizedUri = finding.file.replace(/\\/g, '/');
     const sarifLevel = severityToSarifLevel(finding.severity);
+    const maskedSnippet = finding.snippet ? maskSensitiveSnippet(finding.snippet) : undefined;
 
     results.push({
       ruleId: finding.ruleId,
@@ -135,7 +167,7 @@ export function generateSarifReport(
             region: {
               startLine: Math.max(1, finding.line),
               startColumn: 1,
-              ...(finding.snippet ? { snippet: { text: finding.snippet } } : {})
+              ...(maskedSnippet ? { snippet: { text: maskedSnippet } } : {})
             }
           }
         }
@@ -151,7 +183,7 @@ export function generateSarifReport(
         tool: {
           driver: {
             name: 'Wide Security',
-            version: '0.3141126',
+            version: resolveToolVersion(),
             informationUri: 'https://github.com/sl4de0day/wide-action',
             rules: Array.from(rulesMap.values())
           }

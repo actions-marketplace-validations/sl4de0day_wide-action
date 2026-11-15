@@ -62,4 +62,36 @@ describe('SecurityScanner Engine', () => {
     const fullResult = await scanner.scan({ onlyDiff: false });
     assert.ok(fullResult.findings.length >= 2);
   });
+
+  it('does not fall back to full workspace scan when onlyDiff is true with empty modifiedFiles', async () => {
+    const filePath = join(tmpDir, 'existing_vuln.ts');
+    writeFileSync(filePath, 'const q = "SELECT * FROM users WHERE id = " + req.query.id;\n', 'utf8');
+
+    const scanner = new SecurityScanner(tmpDir);
+    const emptyDiffResult = await scanner.scan({
+      onlyDiff: true,
+      modifiedFiles: new Map<string, Set<number>>()
+    });
+
+    assert.equal(emptyDiffResult.totalFilesScanned, 0);
+    assert.equal(emptyDiffResult.findings.length, 0);
+  });
+
+  it('skips ignored directories, non-code extensions, and binary files in onlyDiff mode', async () => {
+    mkdirSync(join(tmpDir, 'node_modules', 'pkg'), { recursive: true });
+    writeFileSync(join(tmpDir, 'node_modules', 'pkg', 'index.js'), 'const q = "SELECT * FROM x WHERE id=" + req.query.id;\n', 'utf8');
+    writeFileSync(join(tmpDir, 'image.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00]));
+    writeFileSync(join(tmpDir, 'binary.ts'), Buffer.from('const q = "SELECT * FROM x WHERE id=" + req.query.id;\x00\x01'));
+
+    const scanner = new SecurityScanner(tmpDir);
+    const modifiedFiles = new Map<string, Set<number>>([
+      ['node_modules/pkg/index.js', new Set([1])],
+      ['image.png', new Set([1])],
+      ['binary.ts', new Set([1])]
+    ]);
+
+    const res = await scanner.scan({ onlyDiff: true, modifiedFiles });
+    assert.equal(res.totalFilesScanned, 0);
+    assert.equal(res.findings.length, 0);
+  });
 });

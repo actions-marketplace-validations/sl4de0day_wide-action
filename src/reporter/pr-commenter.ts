@@ -2,6 +2,7 @@ import * as core from '@actions/core';
 import type { getOctokit } from '@actions/github';
 import { ScanResult, VulnerabilityFinding } from '../types.js';
 import { formatSummaryComment, formatInlineComment } from './markdown.js';
+import { withRetry } from '../retry.js';
 
 export interface CommenterOptions {
   octokit: ReturnType<typeof getOctokit>;
@@ -33,13 +34,18 @@ export class PrCommenter {
   ): Promise<void> {
     try {
       const body = formatSummaryComment(scanResult, failOn, isBlocked);
-      const comments = await this.octokit.paginate(
-        this.octokit.rest.issues.listComments,
+      const comments = await withRetry(
+        () => this.octokit.paginate(
+          this.octokit.rest.issues.listComments,
+          {
+            owner: this.owner,
+            repo: this.repo,
+            issue_number: this.pullNumber,
+            per_page: 100
+          }
+        ),
         {
-          owner: this.owner,
-          repo: this.repo,
-          issue_number: this.pullNumber,
-          per_page: 100
+          onRetry: (_err, attempt, delayMs) => core.debug(`Retrying listComments (attempt ${attempt}, delay ${delayMs}ms)`)
         }
       );
 
@@ -49,20 +55,20 @@ export class PrCommenter {
 
       if (existingComment) {
         core.info(`Updating existing PR summary comment (ID: ${existingComment.id})...`);
-        await this.octokit.rest.issues.updateComment({
+        await withRetry(() => this.octokit.rest.issues.updateComment({
           owner: this.owner,
           repo: this.repo,
           comment_id: existingComment.id,
           body
-        });
+        }));
       } else {
         core.info('Posting new PR summary comment...');
-        await this.octokit.rest.issues.createComment({
+        await withRetry(() => this.octokit.rest.issues.createComment({
           owner: this.owner,
           repo: this.repo,
           issue_number: this.pullNumber,
           body
-        });
+        }));
       }
     } catch (error) {
       core.warning(`Failed to post or update PR summary comment: ${String(error)}`);
@@ -75,13 +81,18 @@ export class PrCommenter {
     if (findings.length === 0) return 0;
 
     try {
-      const existingReviews = await this.octokit.paginate(
-        this.octokit.rest.pulls.listReviewComments,
+      const existingReviews = await withRetry(
+        () => this.octokit.paginate(
+          this.octokit.rest.pulls.listReviewComments,
+          {
+            owner: this.owner,
+            repo: this.repo,
+            pull_number: this.pullNumber,
+            per_page: 100
+          }
+        ),
         {
-          owner: this.owner,
-          repo: this.repo,
-          pull_number: this.pullNumber,
-          per_page: 100
+          onRetry: (_err, attempt, delayMs) => core.debug(`Retrying listReviewComments (attempt ${attempt}, delay ${delayMs}ms)`)
         }
       );
 
@@ -93,7 +104,7 @@ export class PrCommenter {
         existingKeys.add(key);
       }
 
-      const newComments: Array<{ path: string; line: number; body: string }> = [];
+      const newComments: Array<{ path: string; line: number; side: 'RIGHT'; body: string }> = [];
 
       for (const finding of findings) {
         const normalizedPath = finding.file.replace(/\\/g, '/');
@@ -107,6 +118,7 @@ export class PrCommenter {
         newComments.push({
           path: normalizedPath,
           line: finding.line,
+          side: 'RIGHT',
           body: formatInlineComment(finding)
         });
       }
@@ -122,27 +134,28 @@ export class PrCommenter {
       for (let i = 0; i < newComments.length; i += batchSize) {
         const batch = newComments.slice(i, i + batchSize);
         try {
-          await this.octokit.rest.pulls.createReview({
+          await withRetry(() => this.octokit.rest.pulls.createReview({
             owner: this.owner,
             repo: this.repo,
             pull_number: this.pullNumber,
             commit_id: this.commitSha,
             event: 'COMMENT',
             comments: batch
-          });
+          }));
         } catch (batchError) {
           core.warning(`Batch inline review failed, trying individually: ${String(batchError)}`);
           for (const item of batch) {
             try {
-              await this.octokit.rest.pulls.createReviewComment({
+              await withRetry(() => this.octokit.rest.pulls.createReviewComment({
                 owner: this.owner,
                 repo: this.repo,
                 pull_number: this.pullNumber,
                 commit_id: this.commitSha,
                 path: item.path,
                 line: item.line,
+                side: 'RIGHT',
                 body: item.body
-              });
+              }));
             } catch (singleError) {
               core.warning(`Failed to comment on ${item.path}:${item.line} - ${String(singleError)}`);
             }

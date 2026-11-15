@@ -1,4 +1,4 @@
-import { readFileSync, existsSync, readdirSync } from 'node:fs';
+import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs';
 import { resolve, relative, extname, join } from 'node:path';
 import { SECURITY_RULES, SecurityRule } from './rules.js';
 import {
@@ -8,6 +8,9 @@ import {
   ScanSummary,
   VulnerabilityFinding
 } from '../types.js';
+
+const MAX_SCAN_FILE_BYTES = 2 * 1024 * 1024;
+const MAX_LINE_LENGTH = 1500;
 
 const EXTENSION_MAP: Record<string, string> = {
   '.js': 'js',
@@ -61,25 +64,29 @@ export class SecurityScanner {
     const minRank = minSeverity === 'ALL' ? 0 : SEVERITY_RANKS[minSeverity] || 1;
     const activeRules: readonly SecurityRule[] = (options.rules && options.rules.length > 0) ? options.rules : SECURITY_RULES;
     const findings: VulnerabilityFinding[] = [];
+    const rulesByLang = new Map<string, SecurityRule[]>();
     let scannedFilesCount = 0;
 
-    if (options.onlyDiff && options.modifiedFiles && options.modifiedFiles.size > 0) {
-      for (const [rawFilePath, changedLines] of options.modifiedFiles.entries()) {
-        const normalizedRel = rawFilePath.replace(/\\/g, '/');
-        const fullPath = resolve(this.workspaceDir, normalizedRel);
+    if (options.onlyDiff) {
+      if (options.modifiedFiles) {
+        for (const [rawFilePath, changedLines] of options.modifiedFiles.entries()) {
+          if (!changedLines || changedLines.size === 0) continue;
+          const normalizedRel = rawFilePath.replace(/\\/g, '/');
+          if (!this.isScannableRelativePath(normalizedRel)) continue;
 
-        if (!existsSync(fullPath)) continue;
-
-        scannedFilesCount++;
-        this.scanSingleFile(fullPath, normalizedRel, changedLines, minRank, activeRules, findings);
+          const fullPath = resolve(this.workspaceDir, normalizedRel);
+          if (this.scanSingleFile(fullPath, normalizedRel, changedLines, minRank, activeRules, rulesByLang, findings)) {
+            scannedFilesCount++;
+          }
+        }
       }
     } else {
       const allFiles = this.collectWorkspaceFiles(this.workspaceDir);
-      scannedFilesCount = allFiles.length;
-
       for (const fullPath of allFiles) {
         const relPath = relative(this.workspaceDir, fullPath).replace(/\\/g, '/');
-        this.scanSingleFile(fullPath, relPath, undefined, minRank, activeRules, findings);
+        if (this.scanSingleFile(fullPath, relPath, undefined, minRank, activeRules, rulesByLang, findings)) {
+          scannedFilesCount++;
+        }
       }
     }
 
@@ -99,28 +106,61 @@ export class SecurityScanner {
     };
   }
 
+  private isScannableRelativePath(relPath: string): boolean {
+    const ext = extname(relPath).toLowerCase();
+    if (!(ext in EXTENSION_MAP)) return false;
+    const segments = relPath.split('/');
+    for (let i = 0; i < segments.length - 1; i++) {
+      if (IGNORED_DIRECTORIES.has(segments[i])) return false;
+    }
+    return true;
+  }
+
+  private getRulesForLanguage(
+    lang: string,
+    minRank: number,
+    rules: readonly SecurityRule[],
+    rulesByLang: Map<string, SecurityRule[]>
+  ): SecurityRule[] {
+    let cached = rulesByLang.get(lang);
+    if (!cached) {
+      cached = rules.filter(
+        r => SEVERITY_RANKS[r.severity] >= minRank && (r.languages.includes('all') || r.languages.includes(lang))
+      );
+      rulesByLang.set(lang, cached);
+    }
+    return cached;
+  }
+
   private scanSingleFile(
     fullPath: string,
     relPath: string,
     changedLines: Set<number> | undefined,
     minRank: number,
     rules: readonly SecurityRule[],
+    rulesByLang: Map<string, SecurityRule[]>,
     findings: VulnerabilityFinding[]
-  ): void {
+  ): boolean {
     const ext = extname(fullPath).toLowerCase();
-    const lang = EXTENSION_MAP[ext] || 'all';
+    const lang = EXTENSION_MAP[ext];
+    if (!lang) return false;
 
-    let content = '';
+    let raw: Buffer;
     try {
-      content = readFileSync(fullPath, 'utf8');
+      const st = statSync(fullPath);
+      if (!st.isFile() || st.size > MAX_SCAN_FILE_BYTES) return false;
+      raw = readFileSync(fullPath);
     } catch {
-      return;
+      return false;
     }
 
+    if (raw.subarray(0, Math.min(raw.length, 4096)).includes(0)) {
+      return false;
+    }
+
+    const content = raw.toString('utf8');
     const lines = content.split('\n');
-    const applicableRules = rules.filter(r =>
-      r.languages.includes('all') || r.languages.includes(lang)
-    );
+    const applicableRules = this.getRulesForLanguage(lang, minRank, rules, rulesByLang);
 
     for (let i = 0; i < lines.length; i++) {
       const lineNum = i + 1;
@@ -130,11 +170,9 @@ export class SecurityScanner {
       }
 
       const lineText = lines[i];
-      if (lineText.length > 1500) continue;
+      if (lineText.length > MAX_LINE_LENGTH) continue;
 
       for (const rule of applicableRules) {
-        if (SEVERITY_RANKS[rule.severity] < minRank) continue;
-
         if (rule.pattern.test(lineText)) {
           if (rule.notMatch && rule.notMatch.test(lineText)) continue;
           let confirmed = true;
@@ -161,6 +199,7 @@ export class SecurityScanner {
         }
       }
     }
+    return true;
   }
 
   private collectWorkspaceFiles(dir: string): string[] {

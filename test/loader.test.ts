@@ -1,9 +1,11 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { RuleLoader } from '../src/engine/loader.js';
+import { DEFAULT_AGENT_RULES, SECURITY_RULES } from '../src/engine/rules.js';
 import { SecurityScanner } from '../src/engine/scanner.js';
 
 describe('Action RuleLoader', () => {
@@ -64,6 +66,63 @@ describe('Action RuleLoader', () => {
       assert.equal(RuleLoader.sanitizeOutput('Leaky 🚨', loaded), 'Leaky ');
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('includes all 13 canonical agent rules and fixed cwe079 pattern', () => {
+    const ids = new Set(DEFAULT_AGENT_RULES.map(r => r.id));
+    assert.equal(DEFAULT_AGENT_RULES.length, 13);
+    assert.ok(ids.has('wide/ai-no-system-prompt-leak'));
+    assert.ok(ids.has('wide/ai-direct-file-edits'));
+    assert.ok(ids.has('wide/ai-native-tool-priority'));
+    assert.ok(ids.has('wide/ai-language-matching'));
+    const cwe079 = DEFAULT_AGENT_RULES.find(r => r.id === 'wide/cwe079-ai-prompt-injection');
+    assert.ok(cwe079);
+    assert.equal(cwe079.pattern.test('const prompt = `User said: ${req.body.query}`;'), true);
+  });
+
+  it('verifies SHA256SUMS when loading latest rules and falls back on checksum mismatch', async () => {
+    const origFetch = globalThis.fetch;
+    try {
+      const payload = JSON.stringify({
+        rules: [
+          {
+            id: 'wide/remote-verified',
+            cwe: 'CWE-79',
+            category: 'XSS',
+            severity: 'HIGH',
+            languages: ['js'],
+            pattern: 'innerHTML\\s*=',
+            message: 'Unsafe innerHTML'
+          }
+        ]
+      });
+      const validSha = createHash('sha256').update(payload).digest('hex');
+
+      globalThis.fetch = (async (input: string | URL | Request) => {
+        const url = String(input);
+        if (url.endsWith('SHA256SUMS')) {
+          return new Response(`${validSha}  rules.json\n`, { status: 200 });
+        }
+        return new Response(payload, { status: 200 });
+      }) as typeof fetch;
+
+      const verified = await RuleLoader.loadRules('latest');
+      assert.equal(verified.length, 1);
+      assert.equal(verified[0].id, 'wide/remote-verified');
+
+      globalThis.fetch = (async (input: string | URL | Request) => {
+        const url = String(input);
+        if (url.endsWith('SHA256SUMS')) {
+          return new Response(`${'0'.repeat(64)}  rules.json\n`, { status: 200 });
+        }
+        return new Response(payload, { status: 200 });
+      }) as typeof fetch;
+
+      const fallback = await RuleLoader.loadRules('latest');
+      assert.equal(fallback.length, SECURITY_RULES.length);
+    } finally {
+      globalThis.fetch = origFetch;
     }
   });
 });

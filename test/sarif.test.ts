@@ -87,4 +87,36 @@ describe('SARIF 2.1.0 Generator', () => {
     assert.equal(content.runs[0].results.length, 1);
     assert.equal(content.runs[0].results[0].ruleId, 'WIDE-SEC-008');
   });
+
+  it('handles missing rule cwe and masks sensitive secrets in snippet', () => {
+    const customRules = [
+      {
+        id: 'custom/missing-cwe',
+        category: 'Secret Exposure',
+        severity: 'HIGH',
+        message: 'Token exposed',
+        remediation: 'Rotate secret'
+      }
+    ];
+    const findings: VulnerabilityFinding[] = [
+      {
+        id: 'f3',
+        ruleId: 'custom/missing-cwe',
+        title: 'Secret Exposure',
+        description: 'Exposed secret in config',
+        severity: 'HIGH',
+        file: 'src/secrets.ts',
+        line: 3,
+        snippet: 'const token = "ghp_1234567890abcdef123456"; const aws = "AKIA1234567890123456";',
+        remediation: 'Use env vars'
+      }
+    ];
+
+    const report = generateSarifReport(findings, customRules);
+    assert.equal(report.runs[0].tool.driver.rules[0].properties.tags.includes('n/a'), true);
+    const snippetText = report.runs[0].results[0].locations[0].physicalLocation.region.snippet?.text || '';
+    assert.equal(snippetText.includes('ghp_1234567890abcdef123456'), false);
+    assert.equal(snippetText.includes('AKIA1234567890123456'), false);
+    assert.equal(snippetText.includes('[REDACTED]'), true);
+  });
 });

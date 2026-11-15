@@ -2,6 +2,7 @@ import * as core from '@actions/core';
 import { VulnerabilityFinding } from '../types.js';
 import { WeightedScorer, Criterion, Commitment } from './decision.js';
 import { RuleLoader } from '../engine/loader.js';
+import { fetchWithTimeout, withRetry } from '../retry.js';
 
 export interface RemediationOptions {
   provider: string;
@@ -105,34 +106,48 @@ export class RemediationEngine {
     return parts.join('\n');
   }
 
+  private async postJsonWithRetry(
+    url: string,
+    headers: Record<string, string>,
+    payload: unknown,
+    label: string
+  ): Promise<any> {
+    return withRetry(
+      async () => {
+        const response = await fetchWithTimeout(
+          url,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', ...headers },
+            body: JSON.stringify(payload)
+          },
+          this.timeoutMs
+        );
+        if (!response.ok) {
+          const text = await response.text();
+          const err: any = new Error(`${label} HTTP ${response.status}: ${text}`);
+          err.status = response.status;
+          err.retryAfter = response.headers.get('retry-after');
+          throw err;
+        }
+        return response.json();
+      },
+      {
+        maxAttempts: 3,
+        baseDelayMs: 400,
+        onRetry: (_err, attempt, delayMs) => core.debug(`Retrying ${label} request (attempt ${attempt}, delay ${delayMs}ms)`)
+      }
+    );
+  }
+
   private async callGemini(prompt: string): Promise<string | null> {
     const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${this.apiKey}`;
     const payload = {
       contents: [{ role: 'user', parts: [{ text: prompt }] }],
       generationConfig: { temperature: 0.2, maxOutputTokens: 1024 }
     };
-
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
-
-    try {
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
-        signal: controller.signal
-      });
-
-      if (!response.ok) {
-        const text = await response.text();
-        throw new Error(`Gemini HTTP ${response.status}: ${text}`);
-      }
-
-      const data = await response.json() as any;
-      return data?.candidates?.[0]?.content?.parts?.[0]?.text || null;
-    } finally {
-      clearTimeout(timeout);
-    }
+    const data = await this.postJsonWithRetry(url, {}, payload, 'Gemini');
+    return data?.candidates?.[0]?.content?.parts?.[0]?.text || null;
   }
 
   private async callClaude(prompt: string): Promise<string | null> {
@@ -143,32 +158,13 @@ export class RemediationEngine {
       temperature: 0.2,
       messages: [{ role: 'user', content: prompt }]
     };
-
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
-
-    try {
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-api-key': this.apiKey,
-          'anthropic-version': '2023-06-01'
-        },
-        body: JSON.stringify(payload),
-        signal: controller.signal
-      });
-
-      if (!response.ok) {
-        const text = await response.text();
-        throw new Error(`Claude HTTP ${response.status}: ${text}`);
-      }
-
-      const data = await response.json() as any;
-      return data?.content?.[0]?.text || null;
-    } finally {
-      clearTimeout(timeout);
-    }
+    const data = await this.postJsonWithRetry(
+      url,
+      { 'x-api-key': this.apiKey, 'anthropic-version': '2023-06-01' },
+      payload,
+      'Claude'
+    );
+    return data?.content?.[0]?.text || null;
   }
 
   private async callOpenAiCompatible(
@@ -183,31 +179,13 @@ export class RemediationEngine {
       max_tokens: 1024,
       messages: [{ role: 'user', content: prompt }]
     };
-
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
-
-    try {
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${this.apiKey}`
-        },
-        body: JSON.stringify(payload),
-        signal: controller.signal
-      });
-
-      if (!response.ok) {
-        const text = await response.text();
-        throw new Error(`${model} HTTP ${response.status}: ${text}`);
-      }
-
-      const data = await response.json() as any;
-      return data?.choices?.[0]?.message?.content || null;
-    } finally {
-      clearTimeout(timeout);
-    }
+    const data = await this.postJsonWithRetry(
+      url,
+      { Authorization: `Bearer ${this.apiKey}` },
+      payload,
+      model
+    );
+    return data?.choices?.[0]?.message?.content || null;
   }
 
   public extractSuggestionCode(raw: string): string | null {

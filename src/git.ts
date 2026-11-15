@@ -1,10 +1,12 @@
-import { exec } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import * as core from '@actions/core';
 import type { getOctokit } from '@actions/github';
 import { ModifiedFileDiff } from './types.js';
+import { withRetry } from './retry.js';
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
+const GIT_MAX_BUFFER = 16 * 1024 * 1024;
 
 const HUNK_REGEX = /^@@\s+-(?<oldStart>\d+)(?:,(?<oldLines>\d+))?\s+\+(?<newStart>\d+)(?:,(?<newLines>\d+))?\s+@@/;
 
@@ -94,12 +96,17 @@ export async function getPullRequestDiff(
   pullNumber: number
 ): Promise<ModifiedFileDiff[]> {
   try {
-    const files = await octokit.paginate(octokit.rest.pulls.listFiles, {
-      owner,
-      repo,
-      pull_number: pullNumber,
-      per_page: 100
-    });
+    const files = await withRetry(
+      () => octokit.paginate(octokit.rest.pulls.listFiles, {
+        owner,
+        repo,
+        pull_number: pullNumber,
+        per_page: 100
+      }),
+      {
+        onRetry: (_err, attempt, delayMs) => core.debug(`Retrying pulls.listFiles (attempt ${attempt}, delay ${delayMs}ms)`)
+      }
+    );
 
     return files.map(file => ({
       filename: file.filename,
@@ -118,11 +125,11 @@ export async function getPullRequestDiff(
 export async function getLocalGitDiff(baseRef?: string): Promise<ModifiedFileDiff[]> {
   try {
     const targetRef = baseRef || 'HEAD~1';
-    const { stdout } = await execAsync(`git diff -U0 ${targetRef} HEAD`);
+    const { stdout } = await execFileAsync('git', ['diff', '-U0', targetRef, 'HEAD'], { maxBuffer: GIT_MAX_BUFFER });
     return parseUnifiedDiff(stdout);
   } catch {
     try {
-      const { stdout } = await execAsync('git diff -U0 HEAD');
+      const { stdout } = await execFileAsync('git', ['diff', '-U0', 'HEAD'], { maxBuffer: GIT_MAX_BUFFER });
       return parseUnifiedDiff(stdout);
     } catch (err) {
       core.warning(`Failed to extract local git diff: ${String(err)}`);

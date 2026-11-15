@@ -17,6 +17,27 @@ const SEVERITY_RANKS: Record<SeverityLevel, number> = {
   INFO: 0
 };
 
+const REMEDIATION_CONCURRENCY = 4;
+
+async function runWithConcurrency<T>(
+  items: readonly T[],
+  limit: number,
+  worker: (item: T, index: number) => Promise<void>
+): Promise<void> {
+  if (items.length === 0) return;
+  const workerCount = Math.min(Math.max(1, limit), items.length);
+  let nextIndex = 0;
+  await Promise.all(
+    Array.from({ length: workerCount }, async () => {
+      while (true) {
+        const current = nextIndex++;
+        if (current >= items.length) return;
+        await worker(items[current], current);
+      }
+    })
+  );
+}
+
 export async function run(): Promise<void> {
   try {
     const config = getConfig();
@@ -57,25 +78,30 @@ export async function run(): Promise<void> {
 
     core.info('Running Wide Security Scanner...');
     core.info(`Rules Source: ${config.rules}`);
+    const rulesStart = Date.now();
     const activeRules = await RuleLoader.loadRules(config.rules, process.cwd());
+    core.debug(`Loaded ${activeRules.length} rules in ${Date.now() - rulesStart}ms.`);
+
+    const scanStart = Date.now();
     const scanner = new SecurityScanner(process.cwd());
     const scanResult = await scanner.scan({
       onlyDiff: config.onlyDiff,
       modifiedFiles: modifiedFilesMap,
       rules: activeRules
     });
+    core.debug(`Security scan completed in ${Date.now() - scanStart}ms.`);
 
     core.info(`Scanned ${scanResult.totalFilesScanned} file(s). Found ${scanResult.findings.length} issue(s).`);
     core.info(`Severity Breakdown: [CRITICAL: ${scanResult.summary.critical}] [HIGH: ${scanResult.summary.high}] [MEDIUM: ${scanResult.summary.medium}] [LOW: ${scanResult.summary.low}]`);
 
     if (config.aiRemediation && scanResult.findings.length > 0) {
-      core.info(`Running AI Remediation using provider '${config.provider}'...`);
+      core.info(`Running AI Remediation using provider '${config.provider}' (concurrency=${REMEDIATION_CONCURRENCY})...`);
       const remediationEngine = new RemediationEngine({
         provider: config.provider,
         apiKey: config.apiKey
       });
 
-      for (const finding of scanResult.findings) {
+      await runWithConcurrency(scanResult.findings, REMEDIATION_CONCURRENCY, async finding => {
         try {
           const patch = await remediationEngine.generatePatch(finding);
           if (patch) {
@@ -85,7 +111,7 @@ export async function run(): Promise<void> {
         } catch (err) {
           core.warning(`Failed to generate AI fix for ${finding.file}:${finding.line}: ${String(err)}`);
         }
-      }
+      });
     }
 
     if (config.sarif) {
@@ -103,13 +129,14 @@ export async function run(): Promise<void> {
 
     for (const finding of scanResult.findings) {
       const location = `${finding.file}:${finding.line}`;
-      const msg = `[${finding.severity}] ${finding.title} (${finding.cwe}): ${finding.description}`;
+      const msg = `[${finding.severity}] ${finding.title} (${finding.cwe || 'N/A'}): ${finding.description}`;
+      const annotation = { file: finding.file, startLine: Math.max(1, finding.line) };
       if (finding.severity === 'CRITICAL' || finding.severity === 'HIGH') {
-        core.error(`${location} - ${msg}`);
+        core.error(`${location} - ${msg}`, annotation);
       } else if (finding.severity === 'MEDIUM') {
-        core.warning(`${location} - ${msg}`);
+        core.warning(`${location} - ${msg}`, annotation);
       } else {
-        core.notice(`${location} - ${msg}`);
+        core.notice(`${location} - ${msg}`, annotation);
       }
     }
 

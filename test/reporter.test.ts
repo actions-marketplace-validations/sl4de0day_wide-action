@@ -154,4 +154,45 @@ describe('PrCommenter Anti-Spam and Review Logic', () => {
     assert.equal(count, 0);
     assert.equal(reviewSubmitted, false);
   });
+
+  it('includes side RIGHT when submitting new inline review comments', async () => {
+    let submittedComments: Array<{ path: string; line: number; side?: string; body: string }> = [];
+
+    const mockOctokit = {
+      paginate: async () => [],
+      rest: {
+        pulls: {
+          listReviewComments: {},
+          createReview: async (args: { comments: Array<{ path: string; line: number; side?: string; body: string }> }) => {
+            submittedComments = args.comments;
+          }
+        }
+      }
+    };
+
+    const commenter = new PrCommenter({
+      octokit: mockOctokit as any,
+      owner: 'test-owner',
+      repo: 'test-repo',
+      pullNumber: 2,
+      commitSha: 'sha456'
+    });
+
+    const finding: VulnerabilityFinding = {
+      id: 'f2',
+      ruleId: 'WIDE-SEC-002',
+      title: 'Command Injection',
+      description: 'Cmd injection',
+      severity: 'CRITICAL',
+      file: 'src\\cmd.ts',
+      line: 8,
+      remediation: 'Use execFile'
+    };
+
+    const count = await commenter.postInlineReviewComments([finding]);
+    assert.equal(count, 1);
+    assert.equal(submittedComments.length, 1);
+    assert.equal(submittedComments[0].path, 'src/cmd.ts');
+    assert.equal(submittedComments[0].side, 'RIGHT');
+  });
 });
