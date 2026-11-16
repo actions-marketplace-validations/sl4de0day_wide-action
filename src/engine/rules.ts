@@ -44,20 +44,27 @@ export function toSecurityRule(item: Partial<CompactEmbeddedRule> & Record<strin
   try {
     const notMatchRaw = item['not-match'] || item.notMatch;
     const sourceRaw = item['source-pattern'] || item.sourcePattern;
+    const isExperimental = item.metadata?.status === 'experimental' || item.status === 'experimental';
+    const baseSeverity = normalizeSeverity(item.severity);
+    const effectiveSeverity: SeverityLevel =
+      isExperimental && (baseSeverity === 'CRITICAL' || baseSeverity === 'HIGH') ? 'MEDIUM' : baseSeverity;
+    const rawMsg = typeof item.message === 'string' ? item.message : '';
+    const effectiveMsg =
+      isExperimental && rawMsg && !rawMsg.startsWith('[EXPERIMENTAL]') ? `[EXPERIMENTAL] ${rawMsg}` : rawMsg;
     return {
       id: item.id,
       cwe: typeof item.cwe === 'string' && item.cwe ? item.cwe : 'N/A',
       category: typeof item.category === 'string' && item.category ? item.category : 'General Security',
-      severity: normalizeSeverity(item.severity),
+      severity: effectiveSeverity,
       languages: Array.isArray(item.languages) && item.languages.length > 0 ? [...item.languages] : ['all'],
       pattern: compileRulePattern(item.pattern, item.flags),
       notMatch: typeof notMatchRaw === 'string' && notMatchRaw ? compileRulePattern(notMatchRaw, item.flags) : undefined,
       sourcePattern: typeof sourceRaw === 'string' && sourceRaw ? compileRulePattern(sourceRaw, item.flags) : undefined,
-      message: typeof item.message === 'string' ? item.message : '',
+      message: effectiveMsg,
       remediation: typeof item.remediation === 'string' ? item.remediation : '',
       instruction: typeof item.instruction === 'string' && item.instruction
         ? item.instruction
-        : (typeof item.message === 'string' ? item.message : '')
+        : effectiveMsg
     };
   } catch {
     return null;

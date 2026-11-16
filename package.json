@@ -36,5 +36,9 @@
     "@types/node": "^20.17.0",
     "@vercel/ncc": "^0.38.3",
     "typescript": "^5.7.2"
+  },
+  "overrides": {
+    "@fastify/busboy": "^3.2.2",
+    "undici": "^7.10.0"
   }
 }
