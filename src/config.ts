@@ -32,10 +32,13 @@ export function getConfig(): ActionConfig {
   const onlyDiffRaw = core.getInput('only-diff', { required: false }) || 'true';
   const aiRemediationRaw = core.getInput('ai-remediation', { required: false }) || 'false';
   const provider = (core.getInput('provider', { required: false }) || 'gemini').trim().toLowerCase();
+  const model = (core.getInput('model', { required: false }) || '').trim();
   const apiKey = core.getInput('api-key', { required: false }) || '';
   const sarifRaw = core.getInput('sarif', { required: false }) || 'true';
   const outputPath = (core.getInput('output-path', { required: false }) || 'wide-results.sarif').trim();
   const rules = (core.getInput('rules', { required: false }) || 'embedded').trim();
+  const scaRaw = core.getInput('sca', { required: false }) || 'true';
+  const checkRunRaw = core.getInput('check-run', { required: false }) || 'true';
 
   return {
     githubToken,
@@ -43,9 +46,12 @@ export function getConfig(): ActionConfig {
     onlyDiff: parseBoolean(onlyDiffRaw, true),
     aiRemediation: parseBoolean(aiRemediationRaw, false),
     provider,
+    model,
     apiKey,
     sarif: parseBoolean(sarifRaw, true),
     outputPath,
-    rules
+    rules,
+    sca: parseBoolean(scaRaw, true),
+    checkRun: parseBoolean(checkRunRaw, true)
   };
 }

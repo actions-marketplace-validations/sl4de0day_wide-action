@@ -76,7 +76,8 @@ export class PrCommenter {
   }
 
   public async postInlineReviewComments(
-    findings: VulnerabilityFinding[]
+    findings: VulnerabilityFinding[],
+    diffLinesMap?: Map<string, Set<number>>
   ): Promise<number> {
     if (findings.length === 0) return 0;
 
@@ -108,6 +109,12 @@ export class PrCommenter {
 
       for (const finding of findings) {
         const normalizedPath = finding.file.replace(/\\/g, '/');
+        if (diffLinesMap && diffLinesMap.size > 0) {
+          const fileChanged = diffLinesMap.get(normalizedPath);
+          if (!fileChanged || !fileChanged.has(finding.line)) {
+            continue;
+          }
+        }
         const key = `${normalizedPath}:${finding.line}:${finding.ruleId}`;
 
         if (existingKeys.has(key)) {
@@ -168,5 +175,74 @@ export class PrCommenter {
       core.warning(`Failed to submit inline review comments: ${String(error)}`);
       return 0;
     }
+  }
+
+  public async publishCheckRun(
+    scanResult: ScanResult,
+    failOn: string,
+    isBlocked: boolean
+  ): Promise<boolean> {
+    const checksApi = (this.octokit as any)?.rest?.checks;
+    if (!checksApi || typeof checksApi.create !== 'function') {
+      return false;
+    }
+
+    const annotations = scanResult.findings.slice(0, 50).map((f) => ({
+      path: f.file.replace(/\\/g, '/'),
+      start_line: Math.max(1, f.line),
+      end_line: Math.max(1, f.endLine || f.line),
+      annotation_level:
+        f.severity === 'CRITICAL' || f.severity === 'HIGH'
+          ? ('failure' as const)
+          : f.severity === 'MEDIUM'
+            ? ('warning' as const)
+            : ('notice' as const),
+      title: `[${f.severity}] ${f.title} (${f.ruleId})`,
+      message: `${f.description}${f.remediation ? ` Remediation: ${f.remediation}` : ''}`
+    }));
+
+    try {
+      await withRetry(() => checksApi.create({
+        owner: this.owner,
+        repo: this.repo,
+        name: 'Wide Security Audit',
+        head_sha: this.commitSha,
+        status: 'completed',
+        conclusion: isBlocked ? 'failure' : 'success',
+        output: {
+          title: isBlocked
+            ? `Blocked: ${scanResult.summary.total} issue(s) at or above ${failOn}`
+            : `Passed: ${scanResult.summary.total} issue(s) detected`,
+          summary: formatSummaryComment(scanResult, failOn, isBlocked),
+          annotations
+        }
+      }));
+      return true;
+    } catch (error: any) {
+      const status = Number(error?.status || error?.statusCode || 0);
+      if (status === 403 || status === 404) {
+        core.info('Optional Check Run skipped: token does not have checks:write permission.');
+      } else {
+        core.warning(`Failed to publish GitHub Check Run: ${String(error)}`);
+      }
+      return false;
+    }
+  }
+}
+
+export async function publishStepSummary(
+  scanResult: ScanResult,
+  failOn: string,
+  isBlocked: boolean
+): Promise<boolean> {
+  if (!process.env.GITHUB_STEP_SUMMARY) {
+    return false;
+  }
+  try {
+    await core.summary.addRaw(formatSummaryComment(scanResult, failOn, isBlocked)).write({ overwrite: true });
+    return true;
+  } catch (error) {
+    core.debug(`Failed to write GitHub Step Summary: ${String(error)}`);
+    return false;
   }
 }

@@ -195,4 +195,50 @@ describe('PrCommenter Anti-Spam and Review Logic', () => {
     assert.equal(submittedComments[0].path, 'src/cmd.ts');
     assert.equal(submittedComments[0].side, 'RIGHT');
   });
+
+  it('filters out non-diff lines when diffLinesMap is supplied and skips optional check run cleanly on 403', async () => {
+    let submittedComments: Array<{ path: string; line: number; body: string }> = [];
+    const mockOctokit = {
+      paginate: async () => [],
+      rest: {
+        pulls: {
+          listReviewComments: {},
+          createReview: async (args: { comments: Array<{ path: string; line: number; body: string }> }) => {
+            submittedComments = args.comments;
+          }
+        },
+        checks: {
+          create: async () => {
+            const err: any = new Error('Resource not accessible by integration');
+            err.status = 403;
+            throw err;
+          }
+        }
+      }
+    };
+
+    const commenter = new PrCommenter({
+      octokit: mockOctokit as any,
+      owner: 'test-owner',
+      repo: 'test-repo',
+      pullNumber: 3,
+      commitSha: 'sha789'
+    });
+
+    const findings: VulnerabilityFinding[] = [
+      { id: '1', ruleId: 'wide/r1', title: 'R1', description: 'D1', severity: 'HIGH', file: 'src/a.ts', line: 5, remediation: 'Fix' },
+      { id: '2', ruleId: 'wide/r2', title: 'R2', description: 'D2', severity: 'HIGH', file: 'src/a.ts', line: 99, remediation: 'Fix' }
+    ];
+    const diffLinesMap = new Map<string, Set<number>>([['src/a.ts', new Set([5])]]);
+    const posted = await commenter.postInlineReviewComments(findings, diffLinesMap);
+    assert.equal(posted, 1);
+    assert.equal(submittedComments[0].line, 5);
+
+    const checkCreated = await commenter.publishCheckRun(
+      { totalFilesScanned: 1, findings, summary: { total: 2, critical: 0, high: 2, medium: 0, low: 0, info: 0 } },
+      'HIGH',
+      true
+    );
+    assert.equal(checkCreated, false);
+  });
 });

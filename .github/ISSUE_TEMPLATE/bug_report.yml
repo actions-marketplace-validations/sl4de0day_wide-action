@@ -1,0 +1,25 @@
+name: Bug Report
+description: Report a scanner, SARIF, PR comment, or CI/CD runner issue in Wide Action
+title: "[Bug]: "
+labels: ["bug", "triage"]
+body:
+  - type: input
+    id: action_version
+    attributes:
+      label: Wide Action Version or Tag
+      placeholder: v1 / v0.4151126
+    validations:
+      required: true
+  - type: textarea
+    id: workflow
+    attributes:
+      label: Minimal Workflow YAML
+      render: yaml
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Observed Output and Expected Behavior
+    validations:
+      required: true

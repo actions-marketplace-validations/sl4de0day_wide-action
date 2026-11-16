@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { existsSync, readFileSync } from 'node:fs';
 import { promisify } from 'node:util';
 import * as core from '@actions/core';
 import type { getOctokit } from '@actions/github';
@@ -122,18 +123,43 @@ export async function getPullRequestDiff(
   }
 }
 
+function resolveFallbackBaseRef(explicitRef?: string): string {
+  if (explicitRef) return explicitRef;
+  const baseRef = process.env.GITHUB_BASE_REF?.trim();
+  if (baseRef) return `origin/${baseRef}...HEAD`;
+  const eventPath = process.env.GITHUB_EVENT_PATH;
+  if (eventPath && existsSync(eventPath)) {
+    try {
+      const payload = JSON.parse(readFileSync(eventPath, 'utf8'));
+      const before = typeof payload?.before === 'string' ? payload.before.trim() : '';
+      if (before && !/^0+$/.test(before)) {
+        return `${before}..HEAD`;
+      }
+    } catch {}
+  }
+  return 'HEAD~1';
+}
+
 export async function getLocalGitDiff(baseRef?: string): Promise<ModifiedFileDiff[]> {
   try {
-    const targetRef = baseRef || 'HEAD~1';
-    const { stdout } = await execFileAsync('git', ['diff', '-U0', targetRef, 'HEAD'], { maxBuffer: GIT_MAX_BUFFER });
+    const targetRef = resolveFallbackBaseRef(baseRef);
+    const diffArgs = targetRef.includes('..')
+      ? ['diff', '-U0', targetRef]
+      : ['diff', '-U0', targetRef, 'HEAD'];
+    const { stdout } = await execFileAsync('git', diffArgs, { maxBuffer: GIT_MAX_BUFFER });
     return parseUnifiedDiff(stdout);
   } catch {
     try {
-      const { stdout } = await execFileAsync('git', ['diff', '-U0', 'HEAD'], { maxBuffer: GIT_MAX_BUFFER });
+      const { stdout } = await execFileAsync('git', ['diff', '-U0', 'HEAD~1', 'HEAD'], { maxBuffer: GIT_MAX_BUFFER });
       return parseUnifiedDiff(stdout);
-    } catch (err) {
-      core.warning(`Failed to extract local git diff: ${String(err)}`);
-      return [];
+    } catch {
+      try {
+        const { stdout } = await execFileAsync('git', ['diff', '-U0', 'HEAD'], { maxBuffer: GIT_MAX_BUFFER });
+        return parseUnifiedDiff(stdout);
+      } catch (err) {
+        core.warning(`Failed to extract local git diff: ${String(err)}`);
+        return [];
+      }
     }
   }
 }

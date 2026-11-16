@@ -1,6 +1,7 @@
 import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs';
-import { resolve, relative, extname, join } from 'node:path';
+import { resolve, relative, extname, join, basename } from 'node:path';
 import { SECURITY_RULES, SecurityRule } from './rules.js';
+import { scanWorkspaceDependencies } from './sca.js';
 import {
   ScanResult,
   ScanOptions,
@@ -12,23 +13,62 @@ import {
 const MAX_SCAN_FILE_BYTES = 2 * 1024 * 1024;
 const MAX_LINE_LENGTH = 1500;
 
-const EXTENSION_MAP: Record<string, string> = {
-  '.js': 'js',
-  '.jsx': 'js',
-  '.mjs': 'js',
-  '.cjs': 'js',
-  '.ts': 'ts',
-  '.tsx': 'ts',
-  '.py': 'py',
-  '.php': 'php',
-  '.java': 'java',
-  '.cs': 'cs',
-  '.go': 'go',
-  '.rb': 'rb',
-  '.rs': 'rs',
-  '.c': 'c',
-  '.cpp': 'c',
-  '.h': 'c'
+const AGENT_BEHAVIOR_ONLY_RULE_IDS = new Set([
+  'wide/ai-no-emojis',
+  'wide/ai-no-system-prompt-leak',
+  'wide/ai-direct-file-edits',
+  'wide/ai-native-tool-priority',
+  'wide/ai-language-matching'
+]);
+
+const EXTENSION_LANGS: Record<string, readonly string[]> = {
+  '.js': ['js'],
+  '.jsx': ['jsx', 'js'],
+  '.mjs': ['mjs', 'js'],
+  '.cjs': ['cjs', 'js'],
+  '.ts': ['ts'],
+  '.tsx': ['tsx', 'ts'],
+  '.mts': ['mts', 'ts'],
+  '.cts': ['cts', 'ts'],
+  '.vue': ['vue', 'html', 'js', 'ts'],
+  '.svelte': ['svelte', 'html', 'js', 'ts'],
+  '.html': ['html', 'htm', 'xhtml'],
+  '.htm': ['htm', 'html', 'xhtml'],
+  '.xhtml': ['xhtml', 'html', 'htm'],
+  '.py': ['py'],
+  '.pyi': ['pyi', 'py'],
+  '.pyw': ['pyw', 'py'],
+  '.php': ['php'],
+  '.phtml': ['phtml', 'php'],
+  '.php3': ['php3', 'php'],
+  '.php4': ['php4', 'php'],
+  '.php5': ['php5', 'php'],
+  '.phps': ['phps', 'php'],
+  '.java': ['java'],
+  '.kt': ['kt', 'kotlin'],
+  '.kts': ['kts', 'kt', 'kotlin'],
+  '.scala': ['scala', 'sc'],
+  '.sc': ['sc', 'scala'],
+  '.cs': ['cs'],
+  '.csx': ['csx', 'cs'],
+  '.go': ['go'],
+  '.rb': ['rb'],
+  '.rs': ['rs'],
+  '.c': ['c'],
+  '.cc': ['cc', 'c'],
+  '.cpp': ['cpp', 'c'],
+  '.cxx': ['cxx', 'c'],
+  '.h': ['h', 'c'],
+  '.hh': ['hh', 'c'],
+  '.hpp': ['hpp', 'c'],
+  '.erl': ['erl'],
+  '.hrl': ['hrl', 'erl'],
+  '.ex': ['ex'],
+  '.exs': ['exs', 'ex'],
+  '.sql': ['sql'],
+  '.json': ['json'],
+  '.yaml': ['yaml', 'yml'],
+  '.yml': ['yml', 'yaml']
 };
 
 const SEVERITY_RANKS: Record<SeverityLevel, number> = {
@@ -48,6 +88,9 @@ const IGNORED_DIRECTORIES = new Set([
   '.next',
   'target',
   'coverage',
+  '.venv',
+  'venv',
+  '__pycache__',
   '.gemini',
   '.vscode'
 ]);
@@ -62,9 +105,10 @@ export class SecurityScanner {
   public async scan(options: ScanOptions = {}): Promise<ScanResult> {
     const minSeverity = options.minSeverity || 'LOW';
     const minRank = minSeverity === 'ALL' ? 0 : SEVERITY_RANKS[minSeverity] || 1;
-    const activeRules: readonly SecurityRule[] = (options.rules && options.rules.length > 0) ? options.rules : SECURITY_RULES;
+    const rawRules: readonly SecurityRule[] = (options.rules && options.rules.length > 0) ? options.rules : SECURITY_RULES;
+    const activeRules = rawRules.filter((r) => !AGENT_BEHAVIOR_ONLY_RULE_IDS.has(r.id));
     const findings: VulnerabilityFinding[] = [];
-    const rulesByLang = new Map<string, SecurityRule[]>();
+    const rulesByLangKey = new Map<string, SecurityRule[]>();
     let scannedFilesCount = 0;
 
     if (options.onlyDiff) {
@@ -75,7 +119,7 @@ export class SecurityScanner {
           if (!this.isScannableRelativePath(normalizedRel)) continue;
 
           const fullPath = resolve(this.workspaceDir, normalizedRel);
-          if (this.scanSingleFile(fullPath, normalizedRel, changedLines, minRank, activeRules, rulesByLang, findings)) {
+          if (this.scanSingleFile(fullPath, normalizedRel, changedLines, minRank, activeRules, rulesByLangKey, findings)) {
             scannedFilesCount++;
           }
         }
@@ -84,31 +128,78 @@ export class SecurityScanner {
       const allFiles = this.collectWorkspaceFiles(this.workspaceDir);
       for (const fullPath of allFiles) {
         const relPath = relative(this.workspaceDir, fullPath).replace(/\\/g, '/');
-        if (this.scanSingleFile(fullPath, relPath, undefined, minRank, activeRules, rulesByLang, findings)) {
+        if (this.scanSingleFile(fullPath, relPath, undefined, minRank, activeRules, rulesByLangKey, findings)) {
           scannedFilesCount++;
         }
       }
     }
 
+    const dedupedFindings = this.deduplicateFindings(findings);
+
+    if (options.sca !== false && options.advisories) {
+      const scaFindings = scanWorkspaceDependencies({
+        workspaceDir: this.workspaceDir,
+        advisories: options.advisories,
+        onlyDiff: options.onlyDiff,
+        modifiedFiles: options.modifiedFiles,
+        minRank,
+        severityRanks: SEVERITY_RANKS
+      });
+      dedupedFindings.push(...scaFindings);
+    }
+
     const summary: ScanSummary = {
-      total: findings.length,
-      critical: findings.filter(f => f.severity === 'CRITICAL').length,
-      high: findings.filter(f => f.severity === 'HIGH').length,
-      medium: findings.filter(f => f.severity === 'MEDIUM').length,
-      low: findings.filter(f => f.severity === 'LOW').length,
-      info: findings.filter(f => f.severity === 'INFO').length
+      total: dedupedFindings.length,
+      critical: dedupedFindings.filter(f => f.severity === 'CRITICAL').length,
+      high: dedupedFindings.filter(f => f.severity === 'HIGH').length,
+      medium: dedupedFindings.filter(f => f.severity === 'MEDIUM').length,
+      low: dedupedFindings.filter(f => f.severity === 'LOW').length,
+      info: dedupedFindings.filter(f => f.severity === 'INFO').length
     };
 
     return {
       totalFilesScanned: scannedFilesCount,
-      findings,
+      findings: dedupedFindings,
       summary
     };
   }
 
+  private deduplicateFindings(findings: VulnerabilityFinding[]): VulnerabilityFinding[] {
+    const bySlot = new Map<string, VulnerabilityFinding>();
+    const passthrough: VulnerabilityFinding[] = [];
+
+    for (const f of findings) {
+      const hasValidCwe = f.cwe && f.cwe !== 'N/A';
+      if (!hasValidCwe) {
+        passthrough.push(f);
+        continue;
+      }
+      const key = `${f.file}:${f.line}:${f.cwe}`;
+      const existing = bySlot.get(key);
+      if (!existing || SEVERITY_RANKS[f.severity] > SEVERITY_RANKS[existing.severity]) {
+        bySlot.set(key, f);
+      }
+    }
+
+    return [...bySlot.values(), ...passthrough].sort((a, b) =>
+      a.file.localeCompare(b.file) || a.line - b.line || a.ruleId.localeCompare(b.ruleId)
+    );
+  }
+
+  private resolveLangTokens(filePath: string): readonly string[] | null {
+    const ext = extname(filePath).toLowerCase();
+    if (ext in EXTENSION_LANGS) {
+      return EXTENSION_LANGS[ext];
+    }
+    const base = basename(filePath).toLowerCase();
+    if (base === 'dockerfile' || base.startsWith('dockerfile.')) {
+      return ['yaml', 'yml'];
+    }
+    return null;
+  }
+
   private isScannableRelativePath(relPath: string): boolean {
-    const ext = extname(relPath).toLowerCase();
-    if (!(ext in EXTENSION_MAP)) return false;
+    if (!this.resolveLangTokens(relPath)) return false;
     const segments = relPath.split('/');
     for (let i = 0; i < segments.length - 1; i++) {
       if (IGNORED_DIRECTORIES.has(segments[i])) return false;
@@ -117,19 +208,40 @@ export class SecurityScanner {
   }
 
   private getRulesForLanguage(
-    lang: string,
+    langTokens: readonly string[],
     minRank: number,
     rules: readonly SecurityRule[],
-    rulesByLang: Map<string, SecurityRule[]>
+    rulesByLangKey: Map<string, SecurityRule[]>
   ): SecurityRule[] {
-    let cached = rulesByLang.get(lang);
+    const key = langTokens.join(',');
+    let cached = rulesByLangKey.get(key);
     if (!cached) {
-      cached = rules.filter(
-        r => SEVERITY_RANKS[r.severity] >= minRank && (r.languages.includes('all') || r.languages.includes(lang))
-      );
-      rulesByLang.set(lang, cached);
+      const isDataConfigOnly = langTokens.every((t) => t === 'json' || t === 'yaml' || t === 'yml');
+      cached = rules.filter((r) => {
+        if (SEVERITY_RANKS[r.severity] < minRank) return false;
+        if (r.languages.includes('all')) {
+          return !isDataConfigOnly;
+        }
+        return langTokens.some((t) => r.languages.includes(t));
+      });
+      rulesByLangKey.set(key, cached);
     }
     return cached;
+  }
+
+  private isCommentOnlyLine(lineText: string, langTokens: readonly string[]): boolean {
+    const trimmed = lineText.trim();
+    if (!trimmed) return true;
+    const isJson = langTokens.length === 1 && langTokens[0] === 'json';
+    if (isJson) return false;
+    if (trimmed.startsWith('//') || trimmed.startsWith('/*') || trimmed.startsWith('* ') || trimmed === '*' || trimmed.startsWith('<!--')) {
+      return true;
+    }
+    const usesHashComment = langTokens.some((t) => ['py', 'rb', 'yaml', 'yml', 'ex', 'exs'].includes(t));
+    if (usesHashComment && trimmed.startsWith('#')) {
+      return true;
+    }
+    return false;
   }
 
   private scanSingleFile(
@@ -138,12 +250,11 @@ export class SecurityScanner {
     changedLines: Set<number> | undefined,
     minRank: number,
     rules: readonly SecurityRule[],
-    rulesByLang: Map<string, SecurityRule[]>,
+    rulesByLangKey: Map<string, SecurityRule[]>,
     findings: VulnerabilityFinding[]
   ): boolean {
-    const ext = extname(fullPath).toLowerCase();
-    const lang = EXTENSION_MAP[ext];
-    if (!lang) return false;
+    const langTokens = this.resolveLangTokens(fullPath);
+    if (!langTokens) return false;
 
     let raw: Buffer;
     try {
@@ -160,7 +271,7 @@ export class SecurityScanner {
 
     const content = raw.toString('utf8');
     const lines = content.split('\n');
-    const applicableRules = this.getRulesForLanguage(lang, minRank, rules, rulesByLang);
+    const applicableRules = this.getRulesForLanguage(langTokens, minRank, rules, rulesByLangKey);
 
     for (let i = 0; i < lines.length; i++) {
       const lineNum = i + 1;
@@ -171,6 +282,9 @@ export class SecurityScanner {
 
       const lineText = lines[i];
       if (lineText.length > MAX_LINE_LENGTH) continue;
+      if (/\bwide-ignore\b/i.test(lineText)) continue;
+      if (i > 0 && /\bwide-ignore-next-line\b/i.test(lines[i - 1])) continue;
+      if (this.isCommentOnlyLine(lineText, langTokens)) continue;
 
       for (const rule of applicableRules) {
         if (rule.pattern.test(lineText)) {
@@ -193,7 +307,8 @@ export class SecurityScanner {
               file: relPath,
               line: lineNum,
               snippet: lineText.trim(),
-              remediation: rule.remediation
+              remediation: rule.remediation,
+              source: 'sast'
             });
           }
         }
@@ -214,8 +329,7 @@ export class SecurityScanner {
       if (entry.isDirectory()) {
         results.push(...this.collectWorkspaceFiles(fullPath));
       } else if (entry.isFile()) {
-        const ext = extname(entry.name).toLowerCase();
-        if (ext in EXTENSION_MAP) {
+        if (this.resolveLangTokens(fullPath)) {
           results.push(fullPath);
         }
       }

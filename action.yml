@@ -22,6 +22,10 @@ inputs:
     description: 'AI model provider for code remediation (gemini, claude, deepseek, openai)'
     required: false
     default: 'gemini'
+  model:
+    description: 'Optional AI model override (e.g. gemini-2.5-flash, claude-sonnet-4-20250514, gpt-4o-mini, deepseek-chat)'
+    required: false
+    default: ''
   api-key:
     description: 'API key for the selected AI provider'
     required: false
@@ -38,6 +42,14 @@ inputs:
     description: 'Rule source to load (embedded, latest, or path to rules.json)'
     required: false
     default: 'embedded'
+  sca:
+    description: 'Scan dependency manifests against OSV advisories'
+    required: false
+    default: 'true'
+  check-run:
+    description: 'Publish an optional GitHub Check Run when checks:write permission is available'
+    required: false
+    default: 'true'
 outputs:
   findings-count:
     description: 'Total number of detected vulnerabilities'
@@ -49,10 +61,12 @@ outputs:
     description: 'Number of medium vulnerabilities'
   low-count:
     description: 'Number of low vulnerabilities'
+  sca-count:
+    description: 'Number of vulnerable dependencies detected by OSV SCA scan'
   sarif-path:
     description: 'Path to generated SARIF report'
 runs:
-  using: 'node20'
+  using: 'node24'
   main: 'dist/index.js'
 branding:
   icon: 'shield'

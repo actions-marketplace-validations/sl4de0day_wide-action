@@ -5,7 +5,7 @@ import { getPullRequestDiff, getLocalGitDiff } from './git.js';
 import { SecurityScanner } from './engine/scanner.js';
 import { RuleLoader } from './engine/loader.js';
 import { RemediationEngine } from './remediation/engine.js';
-import { PrCommenter } from './reporter/pr-commenter.js';
+import { PrCommenter, publishStepSummary } from './reporter/pr-commenter.js';
 import { writeSarifReport } from './sarif.js';
 import { SeverityLevel } from './types.js';
 
@@ -50,8 +50,9 @@ export async function run(): Promise<void> {
     core.info(`Commit SHA: ${sha}`);
     core.info(`Fail-On Threshold: ${config.failOn}`);
     core.info(`Only Diff: ${config.onlyDiff}`);
+    core.info(`OSV SCA Scan: ${config.sca ? 'enabled' : 'disabled'}`);
     core.info(`SARIF Output: ${config.sarif ? config.outputPath : 'disabled'}`);
-    core.info(`AI Remediation: ${config.aiRemediation ? config.provider : 'disabled'}`);
+    core.info(`AI Remediation: ${config.aiRemediation ? `${config.provider}${config.model ? ` (${config.model})` : ''}` : 'disabled'}`);
 
     const prNumber = github.context.payload.pull_request?.number;
     const prHeadSha = github.context.payload.pull_request?.head?.sha || sha;
@@ -63,23 +64,32 @@ export async function run(): Promise<void> {
         core.info(`Fetching diff for Pull Request #${prNumber}...`);
         const prDiffs = await getPullRequestDiff(octokit, repo.owner, repo.repo, prNumber);
         for (const file of prDiffs) {
-          modifiedFilesMap.set(file.filename, file.changedLines);
+          modifiedFilesMap.set(file.filename.replace(/\\/g, '/'), file.changedLines);
         }
         core.info(`Retrieved ${prDiffs.length} modified file(s) from Pull Request.`);
       } else {
         core.info('Detecting local git diff...');
         const localDiffs = await getLocalGitDiff();
         for (const file of localDiffs) {
-          modifiedFilesMap.set(file.filename, file.changedLines);
+          modifiedFilesMap.set(file.filename.replace(/\\/g, '/'), file.changedLines);
         }
         core.info(`Detected ${localDiffs.length} modified file(s) via git diff.`);
       }
+    } else if (prNumber && octokit) {
+      try {
+        const prDiffs = await getPullRequestDiff(octokit, repo.owner, repo.repo, prNumber);
+        for (const file of prDiffs) {
+          modifiedFilesMap.set(file.filename.replace(/\\/g, '/'), file.changedLines);
+        }
+      } catch {}
     }
 
     core.info('Running Wide Security Scanner...');
     core.info(`Rules Source: ${config.rules}`);
     const rulesStart = Date.now();
     const activeRules = await RuleLoader.loadRules(config.rules, process.cwd());
+    const agentRules = await RuleLoader.loadAgentRules(config.rules, process.cwd(), activeRules);
+    const advisories = config.sca ? await RuleLoader.loadAdvisories(config.rules, process.cwd()) : undefined;
     core.debug(`Loaded ${activeRules.length} rules in ${Date.now() - rulesStart}ms.`);
 
     const scanStart = Date.now();
@@ -87,23 +97,28 @@ export async function run(): Promise<void> {
     const scanResult = await scanner.scan({
       onlyDiff: config.onlyDiff,
       modifiedFiles: modifiedFilesMap,
-      rules: activeRules
+      rules: activeRules,
+      sca: config.sca,
+      advisories
     });
     core.debug(`Security scan completed in ${Date.now() - scanStart}ms.`);
 
-    core.info(`Scanned ${scanResult.totalFilesScanned} file(s). Found ${scanResult.findings.length} issue(s).`);
+    const scaCount = scanResult.findings.filter(f => f.source === 'sca').length;
+    core.info(`Scanned ${scanResult.totalFilesScanned} file(s). Found ${scanResult.findings.length} issue(s) (SAST: ${scanResult.findings.length - scaCount}, SCA: ${scaCount}).`);
     core.info(`Severity Breakdown: [CRITICAL: ${scanResult.summary.critical}] [HIGH: ${scanResult.summary.high}] [MEDIUM: ${scanResult.summary.medium}] [LOW: ${scanResult.summary.low}]`);
 
-    if (config.aiRemediation && scanResult.findings.length > 0) {
+    const sastFindingsForAi = scanResult.findings.filter(f => f.source !== 'sca');
+    if (config.aiRemediation && sastFindingsForAi.length > 0) {
       core.info(`Running AI Remediation using provider '${config.provider}' (concurrency=${REMEDIATION_CONCURRENCY})...`);
       const remediationEngine = new RemediationEngine({
         provider: config.provider,
+        model: config.model,
         apiKey: config.apiKey
       });
 
-      await runWithConcurrency(scanResult.findings, REMEDIATION_CONCURRENCY, async finding => {
+      await runWithConcurrency(sastFindingsForAi, REMEDIATION_CONCURRENCY, async finding => {
         try {
-          const patch = await remediationEngine.generatePatch(finding);
+          const patch = await remediationEngine.generatePatch(finding, '', agentRules);
           if (patch) {
             finding.suggestedPatch = patch;
             core.info(`Generated AI fix for ${finding.file}:${finding.line} (${finding.ruleId})`);
@@ -126,6 +141,7 @@ export async function run(): Promise<void> {
     core.setOutput('high-count', scanResult.summary.high.toString());
     core.setOutput('medium-count', scanResult.summary.medium.toString());
     core.setOutput('low-count', scanResult.summary.low.toString());
+    core.setOutput('sca-count', scaCount.toString());
 
     for (const finding of scanResult.findings) {
       const location = `${finding.file}:${finding.line}`;
@@ -148,18 +164,29 @@ export async function run(): Promise<void> {
       );
     }
 
-    if (prNumber && octokit) {
-      core.info('Publishing PR review and summary comments...');
-      const commenter = new PrCommenter({
-        octokit,
-        owner: repo.owner,
-        repo: repo.repo,
-        pullNumber: prNumber,
-        commitSha: prHeadSha
-      });
+    await publishStepSummary(scanResult, config.failOn, isBlocked);
 
+    const commenter = octokit
+      ? new PrCommenter({
+          octokit,
+          owner: repo.owner,
+          repo: repo.repo,
+          pullNumber: prNumber || 0,
+          commitSha: prHeadSha
+        })
+      : null;
+
+    if (prNumber && commenter) {
+      core.info('Publishing PR review and summary comments...');
       await commenter.postOrUpdateSummary(scanResult, config.failOn, isBlocked);
-      await commenter.postInlineReviewComments(scanResult.findings);
+      await commenter.postInlineReviewComments(
+        scanResult.findings,
+        modifiedFilesMap.size > 0 ? modifiedFilesMap : undefined
+      );
+    }
+
+    if (config.checkRun && commenter) {
+      await commenter.publishCheckRun(scanResult, config.failOn, isBlocked);
     }
 
     if (isBlocked) {

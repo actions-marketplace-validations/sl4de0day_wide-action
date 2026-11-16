@@ -7,7 +7,8 @@
   "scripts": {
     "build": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && ncc build src/index.ts -o dist --minify --license licenses.txt",
     "compile": "tsc",
-    "test": "node -e \"require('node:fs').rmSync('lib', { recursive: true, force: true })\" && tsc && node --test lib/test/**/*.test.js"
+    "sync:bundle": "node scripts/sync-bundle.mjs",
+    "test": "node -e \"require('node:fs').rmSync('lib', { recursive: true, force: true })\" && tsc && node scripts/run-tests.mjs"
   },
   "repository": {
     "type": "git",

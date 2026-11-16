@@ -77,4 +77,58 @@ describe('AI Remediation Engine', () => {
     assert.ok(md.includes('```suggestion'));
     assert.ok(md.includes('const q = await db.query("SELECT * FROM users WHERE id = $1", [id]);'));
   });
+
+  it('sends Gemini key in header instead of URL, uses model override, and enforces patch quality scoring', async () => {
+    const origFetch = globalThis.fetch;
+    let seenUrl = '';
+    let seenKeyHeader = '';
+    let seenModelBody = '';
+    try {
+      globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+        seenUrl = String(input);
+        const headers = init?.headers as Record<string, string> | undefined;
+        seenKeyHeader = headers?.['x-goog-api-key'] || '';
+        seenModelBody = String(init?.body || '');
+        return new Response(
+          JSON.stringify({
+            candidates: [
+              {
+                content: {
+                  parts: [{ text: '```suggestion\nconst q = await db.query("SELECT * FROM users WHERE id = $1", [id]);\n```' }]
+                }
+              }
+            ]
+          }),
+          { status: 200 }
+        );
+      }) as typeof fetch;
+
+      const engine = new RemediationEngine({
+        provider: 'gemini',
+        model: 'gemini-2.5-pro',
+        apiKey: 'secret-test-key'
+      });
+      const finding: VulnerabilityFinding = {
+        id: 'f2',
+        ruleId: 'wide/sql-concatenation',
+        title: 'INJECTION',
+        description: 'SQLi',
+        severity: 'CRITICAL',
+        file: 'src/app.ts',
+        line: 10,
+        snippet: 'const q = "SELECT * FROM users WHERE id = " + id;',
+        remediation: 'Use bound parameters'
+      };
+
+      const patch = await engine.generatePatch(finding);
+      assert.equal(patch, 'const q = await db.query("SELECT * FROM users WHERE id = $1", [id]);');
+      assert.equal(seenUrl.includes('key='), false);
+      assert.equal(seenUrl.includes('gemini-2.5-pro'), true);
+      assert.equal(seenKeyHeader, 'secret-test-key');
+      assert.equal(engine.selectBestCandidatePatch(['const q = "SELECT * FROM users WHERE id = " + id;'], finding.snippet || ''), null);
+      assert.ok(seenModelBody.includes('Ecosystem Agent Guardrails'));
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+  });
 });

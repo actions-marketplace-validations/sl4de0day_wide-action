@@ -9,10 +9,14 @@ import { DEFAULT_AGENT_RULES, SECURITY_RULES } from '../src/engine/rules.js';
 import { SecurityScanner } from '../src/engine/scanner.js';
 
 describe('Action RuleLoader', () => {
-  it('loads embedded rules by default', async () => {
+  it('loads all 729 canonical embedded rules and OSV advisories by default', async () => {
     const rules = await RuleLoader.loadRules('embedded');
     assert.ok(Array.isArray(rules));
-    assert.ok(rules.length >= 20);
+    assert.ok(rules.length >= 729);
+    const advisories = await RuleLoader.loadAdvisories('embedded');
+    assert.ok(Array.isArray(advisories.npm) && advisories.npm.length > 0);
+    assert.ok(Array.isArray(advisories.maven) && advisories.maven.length > 0);
+    assert.ok(Array.isArray(advisories.cargo) && advisories.cargo.length > 0);
   });
 
   it('falls back to embedded rules when custom file is missing', async () => {

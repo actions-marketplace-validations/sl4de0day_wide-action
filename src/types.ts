@@ -8,10 +8,13 @@ export interface ActionConfig {
   onlyDiff: boolean;
   aiRemediation: boolean;
   provider: string;
+  model: string;
   apiKey: string;
   sarif: boolean;
   outputPath: string;
   rules: string;
+  sca: boolean;
+  checkRun: boolean;
 }
 
 export interface VulnerabilityFinding {
@@ -28,6 +31,11 @@ export interface VulnerabilityFinding {
   cwe?: string;
   remediation?: string;
   suggestedPatch?: string;
+  source?: 'sast' | 'sca';
+  packageName?: string;
+  fixedVersion?: string;
+  kev?: boolean;
+  epss?: number;
 }
 
 export interface ScanSummary {
@@ -68,4 +76,6 @@ export interface ScanOptions {
   modifiedFiles?: Map<string, Set<number>>;
   minSeverity?: SeverityLevel | 'ALL';
   rules?: any[];
+  sca?: boolean;
+  advisories?: Record<string, any[]>;
 }

@@ -2,7 +2,8 @@ import { createHash } from 'node:crypto';
 import { readFileSync, existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import * as core from '@actions/core';
-import { SECURITY_RULES, DEFAULT_AGENT_RULES, SecurityRule } from './rules.js';
+import { SECURITY_RULES, DEFAULT_AGENT_RULES, SecurityRule, toSecurityRule } from './rules.js';
+import { EMBEDDED_OSV_DATA } from './embedded-bundle.js';
 import { fetchWithTimeout } from '../retry.js';
 
 const REMOTE_RULES_URL = 'https://raw.githubusercontent.com/sl4de0day/wide-rules/main/dist/rules.json';
@@ -118,9 +119,12 @@ export class RuleLoader {
 
   public static async loadAgentRules(
     source = 'embedded',
-    workspaceDir = process.cwd()
+    workspaceDir = process.cwd(),
+    preloadedRules?: readonly SecurityRule[]
   ): Promise<SecurityRule[]> {
-    const allRules = await this.loadRules(source, workspaceDir);
+    const allRules = preloadedRules && preloadedRules.length > 0
+      ? preloadedRules
+      : await this.loadRules(source, workspaceDir);
     const filtered = allRules.filter(r => r.category === 'AI_SECURITY' || r.id.includes('ai-'));
     if (filtered.length > 0) {
       return filtered;
@@ -173,24 +177,9 @@ export class RuleLoader {
   private static parseRulesList(list: any[]): SecurityRule[] {
     const result: SecurityRule[] = [];
     for (const item of list) {
-      if (!item.id || !item.pattern) continue;
-      try {
-        const notMatchRaw = item['not-match'] || item.notMatch;
-        result.push({
-          id: item.id,
-          cwe: item.cwe || 'N/A',
-          category: item.category || 'General Security',
-          severity: item.severity || 'MEDIUM',
-          languages: item.languages || ['all'],
-          pattern: new RegExp(item.pattern, 'i'),
-          notMatch: typeof notMatchRaw === 'string' && notMatchRaw ? new RegExp(notMatchRaw, 'i') : undefined,
-          sourcePattern: item['source-pattern'] ? new RegExp(item['source-pattern'], 'i') : undefined,
-          message: item.message || '',
-          remediation: item.remediation || '',
-          instruction: item.instruction || item.message || ''
-        });
-      } catch {
-        continue;
+      const parsed = toSecurityRule(item);
+      if (parsed) {
+        result.push(parsed);
       }
     }
     return result;
@@ -213,7 +202,7 @@ export class RuleLoader {
         verifyChecksum(raw, checksums, 'osv-bundle.json');
         return JSON.parse(raw);
       } catch (err) {
-        core.warning(`Failed to fetch latest OSV advisories: ${String(err)}.`);
+        core.warning(`Failed to fetch latest OSV advisories: ${String(err)}. Falling back to embedded OSV bundle.`);
       }
     }
     const candidates = [
@@ -229,6 +218,6 @@ export class RuleLoader {
         }
       }
     }
-    return { npm: [], pip: [], maven: [], go: [] };
+    return EMBEDDED_OSV_DATA;
   }
 }
