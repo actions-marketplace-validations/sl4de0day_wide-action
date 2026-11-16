@@ -17,17 +17,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout wide-action
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Checkout upstream wide-rules
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: sl4de0day/wide-rules
           ref: main
           path: .wide-rules-upstream
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 24
 
@@ -43,7 +43,7 @@ jobs:
 
       - name: Open Pull Request for Updated Bundle
         id: create_pr
-        uses: peter-evans/create-pull-request@v7
+        uses: peter-evans/create-pull-request@v8
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           commit-message: "chore(bundle): sync latest wide-rules and OSV advisories"
