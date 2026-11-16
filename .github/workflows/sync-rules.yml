@@ -39,6 +39,7 @@ jobs:
           npm run build
 
       - name: Open Pull Request for Updated Bundle
+        id: create_pr
         uses: peter-evans/create-pull-request@v7
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -47,3 +48,21 @@ jobs:
           body: "Automated update triggered by wide-rules changes, verified with npm test and npm run build."
           branch: chore/sync-wide-rules
           delete-branch: true
+
+      - name: Auto-Merge Updated Bundle PR
+        id: merge_pr
+        if: steps.create_pr.outputs.pull-request-number != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ steps.create_pr.outputs.pull-request-number }}
+        run: |
+          gh pr merge "$PR_NUMBER" --repo "${{ github.repository }}" --squash --delete-branch || gh pr merge "$PR_NUMBER" --repo "${{ github.repository }}" --auto --squash --delete-branch
+
+      - name: Update v1 Release Tag
+        if: steps.merge_pr.outcome == 'success'
+        run: |
+          git config user.name "wide-rules-bot"
+          git config user.email "wide-rules-bot@users.noreply.github.com"
+          git fetch origin main --tags
+          git tag -f v1 origin/main
+          git push origin refs/tags/v1 --force
