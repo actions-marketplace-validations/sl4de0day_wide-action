@@ -12,6 +12,14 @@ export interface RemediationOptions {
   timeoutMs?: number;
 }
 
+export type TriageVerdict = 'EXPLOITABLE' | 'MITIGATED' | 'FALSE_POSITIVE';
+
+export interface TriageAndRemediationResult {
+  verdict?: TriageVerdict;
+  reason?: string;
+  patch: string | null;
+}
+
 const MIN_PATCH_QUALITY_SCORE = 0.5;
 
 export class RemediationEngine {
@@ -27,14 +35,14 @@ export class RemediationEngine {
     this.timeoutMs = options.timeoutMs || 15000;
   }
 
-  public async generatePatch(
+  public async analyzeAndRemediate(
     finding: VulnerabilityFinding,
     surroundingContext = '',
     agentRules?: readonly SecurityRule[]
-  ): Promise<string | null> {
+  ): Promise<TriageAndRemediationResult> {
     if (!this.apiKey) {
       core.info(`AI Remediation skipped: No API key provided for provider '${this.provider}'.`);
-      return null;
+      return { patch: null };
     }
 
     const prompt = this.buildPrompt(finding, surroundingContext, agentRules);
@@ -60,18 +68,48 @@ export class RemediationEngine {
         );
       } else {
         core.warning(`Unsupported AI provider for remediation: ${this.provider}`);
-        return null;
+        return { patch: null };
       }
 
-      if (!rawResponse) return null;
-      const extracted = this.extractSuggestionCode(rawResponse, agentRules);
-      if (!extracted) return null;
-
-      return this.selectBestCandidatePatch([extracted], finding.snippet || '');
+      if (!rawResponse) return { patch: null };
+      const parsed = this.parseTriageResponse(rawResponse, finding.snippet || '', agentRules);
+      return parsed;
     } catch (error) {
       core.warning(`AI Remediation error with ${this.provider}: ${String(error)}`);
-      return null;
+      return { patch: null };
     }
+  }
+
+  public async generatePatch(
+    finding: VulnerabilityFinding,
+    surroundingContext = '',
+    agentRules?: readonly SecurityRule[]
+  ): Promise<string | null> {
+    const res = await this.analyzeAndRemediate(finding, surroundingContext, agentRules);
+    return res.patch;
+  }
+
+  public parseTriageResponse(
+    raw: string,
+    originalSnippet: string,
+    agentRules?: readonly SecurityRule[]
+  ): TriageAndRemediationResult {
+    const verdictMatch = /^VERDICT:\s*(EXPLOITABLE|MITIGATED|FALSE_POSITIVE)\b/im.exec(raw);
+    const reasonMatch = /^REASON:\s*(.+)$/im.exec(raw);
+    const verdict = verdictMatch ? (verdictMatch[1].toUpperCase() as TriageVerdict) : undefined;
+    const reason = reasonMatch ? reasonMatch[1].trim() : undefined;
+
+    if (verdict === 'FALSE_POSITIVE' || verdict === 'MITIGATED') {
+      const explicitSuggestion = raw.match(/```suggestion\r?\n([\s\S]*?)\r?\n```/);
+      if (!explicitSuggestion) {
+        return { verdict, reason, patch: null };
+      }
+    }
+
+    const extracted = this.extractSuggestionCode(raw, agentRules);
+    if (!extracted) return { verdict, reason, patch: null };
+    const patch = this.selectBestCandidatePatch([extracted], originalSnippet);
+    return { verdict, reason, patch };
   }
 
   private resolveApiKey(provider: string): string {
@@ -107,12 +145,14 @@ export class RemediationEngine {
       finding.snippet || '',
       '',
       context ? `Surrounding Context:\n${context}\n` : '',
-      'Provide a direct, production-ready replacement for ONLY the vulnerable line or minimal code block.',
-      'Wrap your replacement inside a GitHub suggested change block:',
+      'First verify reachability and existing sanitization in the surrounding context.',
+      'Start your response with:',
+      'VERDICT: EXPLOITABLE | MITIGATED | FALSE_POSITIVE',
+      'REASON: <one concise technical sentence explaining the flow or mitigation>',
+      'If VERDICT is EXPLOITABLE, provide a direct replacement for ONLY the vulnerable line or minimal code block inside:',
       '```suggestion',
       '<replacement code here>',
-      '```',
-      'Do not include any explanations, prose, or commentary outside the suggestion block.'
+      '```'
     ];
     if (guardrails) {
       parts.push('', 'Ecosystem Agent Guardrails (wide-rules):', guardrails);

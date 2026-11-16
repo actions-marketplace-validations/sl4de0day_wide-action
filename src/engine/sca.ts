@@ -1,5 +1,5 @@
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
-import { basename, join, relative, resolve } from 'node:path';
+import { basename, extname, join, relative, resolve } from 'node:path';
 import { SeverityLevel, VulnerabilityFinding } from '../types.js';
 import { EmbeddedAdvisoryEntry } from './embedded-bundle.js';
 import { normalizeSeverity } from './rules.js';
@@ -15,9 +15,16 @@ export interface ManifestDependency {
 const MANIFEST_NAMES = new Set([
   'package.json',
   'package-lock.json',
+  'yarn.lock',
+  'pnpm-lock.yaml',
   'requirements.txt',
+  'poetry.lock',
+  'pipfile.lock',
   'go.mod',
   'cargo.toml',
+  'cargo.lock',
+  'composer.lock',
+  'gemfile.lock',
   'pom.xml'
 ]);
 
@@ -133,6 +140,44 @@ export function parseManifestDependencies(filePath: string, content: string): Ma
     return deps;
   }
 
+  if (base === 'yarn.lock') {
+    let currentPkgs: string[] = [];
+    for (let i = 0; i < lines.length; i++) {
+      const t = lines[i].trim();
+      if (/^[^\s#"][^:\n]*:$/.test(t) || /^"[^"]+.*":$/.test(t)) {
+        currentPkgs = t
+          .replace(/:$/, '')
+          .split(',')
+          .map((spec) => {
+            const cleaned = spec.trim().replace(/^["']|["']$/g, '');
+            const atIdx = cleaned.lastIndexOf('@');
+            return atIdx > 0 ? cleaned.slice(0, atIdx) : '';
+          })
+          .filter(Boolean);
+        continue;
+      }
+      const vm = /^\s+version\s+(?:"([^"]+)"|'([^']+)'|([^\s]+))/.exec(lines[i]);
+      if (vm && currentPkgs.length > 0) {
+        const ver = vm[1] || vm[2] || vm[3];
+        for (const name of currentPkgs) {
+          pushDep('npm', name, ver, i + 1, lines[i]);
+        }
+        currentPkgs = [];
+      }
+    }
+    return deps;
+  }
+
+  if (base === 'pnpm-lock.yaml') {
+    for (let i = 0; i < lines.length; i++) {
+      const m = /^\s{2,4}'?\/?(@?[^/\s':]+(?:\/[^@\s(':]+)?)[@/]([0-9][0-9A-Za-z.\-+]*)/.exec(lines[i]);
+      if (m) {
+        pushDep('npm', m[1], m[2], i + 1, lines[i]);
+      }
+    }
+    return deps;
+  }
+
   if (base === 'requirements.txt') {
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
@@ -145,6 +190,43 @@ export function parseManifestDependencies(filePath: string, content: string): Ma
     return deps;
   }
 
+  if (base === 'poetry.lock') {
+    let curName = '';
+    let curLine = 1;
+    for (let i = 0; i < lines.length; i++) {
+      const nm = /^name\s*=\s*"([^"]+)"/.exec(lines[i].trim());
+      if (nm) {
+        curName = nm[1];
+        curLine = i + 1;
+        continue;
+      }
+      const vm = /^version\s*=\s*"([^"]+)"/.exec(lines[i].trim());
+      if (vm && curName) {
+        pushDep('pip', curName, vm[1], curLine, `${curName} = "${vm[1]}"`);
+        curName = '';
+      }
+    }
+    return deps;
+  }
+
+  if (base === 'pipfile.lock') {
+    try {
+      const doc = JSON.parse(content);
+      for (const sec of ['default', 'develop']) {
+        const map = doc[sec];
+        if (!map || typeof map !== 'object') continue;
+        for (const [name, info] of Object.entries<any>(map)) {
+          const ver = String(info?.version || '').replace(/^==\s*/, '');
+          if (ver) {
+            const ln = findLineForToken(lines, `"${name}"`);
+            pushDep('pip', name, ver, ln, lines[ln - 1] || `"${name}": "${ver}"`);
+          }
+        }
+      }
+    } catch {}
+    return deps;
+  }
+
   if (base === 'go.mod') {
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
@@ -152,6 +234,25 @@ export function parseManifestDependencies(filePath: string, content: string): Ma
       const m = /^\s*(?:require\s+)?([A-Za-z0-9._~/-]+\.[A-Za-z0-9._~/-]+)\s+(v[0-9][0-9A-Za-z.\-+]*)/.exec(line);
       if (m) {
         pushDep('go', m[1], m[2], i + 1, line);
+      }
+    }
+    return deps;
+  }
+
+  if (base === 'cargo.lock') {
+    let curName = '';
+    let curLine = 1;
+    for (let i = 0; i < lines.length; i++) {
+      const nm = /^\s*name\s*=\s*"([^"]+)"/.exec(lines[i]);
+      if (nm) {
+        curName = nm[1];
+        curLine = i + 1;
+        continue;
+      }
+      const vm = /^\s*version\s*=\s*"([^"]+)"/.exec(lines[i]);
+      if (vm && curName) {
+        pushDep('cargo', curName, vm[1], curLine, `${curName} = "${vm[1]}"`);
+        curName = '';
       }
     }
     return deps;
@@ -176,6 +277,32 @@ export function parseManifestDependencies(filePath: string, content: string): Ma
       const inlineTable = /^([A-Za-z0-9_-]+)\s*=\s*\{[^}]*\bversion\s*=\s*["']([^"']+)["']/.exec(line);
       if (inlineTable) {
         pushDep('cargo', inlineTable[1], inlineTable[2], i + 1, line);
+      }
+    }
+    return deps;
+  }
+
+  if (base === 'composer.lock') {
+    try {
+      const doc = JSON.parse(content);
+      const pkgs = [
+        ...(Array.isArray(doc.packages) ? doc.packages : []),
+        ...(Array.isArray(doc['packages-dev']) ? doc['packages-dev'] : [])
+      ];
+      for (const p of pkgs) {
+        if (!p?.name || !p?.version) continue;
+        const ln = findLineForToken(lines, `"${p.name}"`);
+        pushDep('composer', p.name, String(p.version), ln, lines[ln - 1] || `"${p.name}": "${p.version}"`);
+      }
+    } catch {}
+    return deps;
+  }
+
+  if (base === 'gemfile.lock') {
+    for (let i = 0; i < lines.length; i++) {
+      const m = /^\s{4}([A-Za-z0-9_.-]+)\s+\(([0-9][0-9A-Za-z.-]*)\)/.exec(lines[i]);
+      if (m) {
+        pushDep('rubygems', m[1], m[2], i + 1, lines[i]);
       }
     }
     return deps;
@@ -226,6 +353,67 @@ function collectManifestFiles(dir: string): string[] {
   return results;
 }
 
+function normalizeImportedPackage(spec: string): string {
+  const clean = spec.trim().replace(/^['"]|['"]$/g, '');
+  if (!clean || clean.startsWith('.')) return '';
+  if (clean.startsWith('@')) {
+    const parts = clean.split('/');
+    return parts.length >= 2 ? `${parts[0]}/${parts[1]}`.toLowerCase() : clean.toLowerCase();
+  }
+  return clean.split('/')[0].toLowerCase();
+}
+
+export function collectImportedPackagesFromContent(content: string, imported: Set<string>): void {
+  const jsRe = /(?:import\s+(?:[\s\S]{1,120}?\s+from\s+)?|require\s*\()\s*["']([^"']+)["']/g;
+  let m: RegExpExecArray | null;
+  while ((m = jsRe.exec(content)) !== null) {
+    const pkg = normalizeImportedPackage(m[1]);
+    if (pkg) imported.add(pkg);
+  }
+  const pyRe = /^\s*(?:from|import)\s+([A-Za-z0-9_.-]+)/gm;
+  while ((m = pyRe.exec(content)) !== null) {
+    const base = m[1].split('.')[0].toLowerCase();
+    imported.add(base);
+    imported.add(base.replace(/_/g, '-'));
+  }
+  const goRe = /"([A-Za-z0-9._~/-]+\.[A-Za-z0-9._~/-]+)"/g;
+  while ((m = goRe.exec(content)) !== null) {
+    imported.add(m[1].toLowerCase());
+  }
+  const rustRe = /^\s*(?:use|extern\s+crate)\s+([A-Za-z0-9_]+)/gm;
+  while ((m = rustRe.exec(content)) !== null) {
+    imported.add(m[1].toLowerCase());
+    imported.add(m[1].toLowerCase().replace(/_/g, '-'));
+  }
+}
+
+const CODE_EXTS = new Set(['.js', '.jsx', '.mjs', '.cjs', '.ts', '.tsx', '.mts', '.cts', '.py', '.go', '.rs', '.php', '.rb', '.java']);
+
+export function collectWorkspaceImports(dir: string, limit = 600): Set<string> {
+  const imported = new Set<string>();
+  const walk = (cur: string, count: { n: number }) => {
+    if (!existsSync(cur) || count.n >= limit) return;
+    for (const entry of readdirSync(cur, { withFileTypes: true })) {
+      if (count.n >= limit) return;
+      if (IGNORED_DIRS.has(entry.name)) continue;
+      const full = join(cur, entry.name);
+      if (entry.isDirectory()) {
+        walk(full, count);
+      } else if (entry.isFile() && CODE_EXTS.has(extname(entry.name).toLowerCase())) {
+        try {
+          const st = statSync(full);
+          if (st.size <= 512 * 1024) {
+            collectImportedPackagesFromContent(readFileSync(full, 'utf8'), imported);
+            count.n++;
+          }
+        } catch {}
+      }
+    }
+  };
+  walk(dir, { n: 0 });
+  return imported;
+}
+
 export function scanWorkspaceDependencies(options: {
   workspaceDir: string;
   advisories: Record<string, readonly EmbeddedAdvisoryEntry[]>;
@@ -233,6 +421,7 @@ export function scanWorkspaceDependencies(options: {
   modifiedFiles?: Map<string, Set<number>>;
   minRank: number;
   severityRanks: Record<SeverityLevel, number>;
+  importedPackages?: ReadonlySet<string>;
 }): VulnerabilityFinding[] {
   const { workspaceDir, advisories, onlyDiff, modifiedFiles, minRank, severityRanks } = options;
   if (!advisories || typeof advisories !== 'object') return [];
@@ -254,6 +443,10 @@ export function scanWorkspaceDependencies(options: {
     }
   }
 
+  if (targets.length === 0) return [];
+  const imported = options.importedPackages || collectWorkspaceImports(workspaceDir);
+  const hasAnyImports = imported.size > 0;
+
   const findings: VulnerabilityFinding[] = [];
   const emitted = new Set<string>();
 
@@ -274,6 +467,7 @@ export function scanWorkspaceDependencies(options: {
       const ecoList = advisories[dep.ecosystem] || [];
       if (!Array.isArray(ecoList) || ecoList.length === 0) continue;
       const depLower = dep.name.toLowerCase();
+      const isReachable = imported.has(depLower) || (depLower.includes(':') && imported.has(depLower.split(':')[1]));
 
       for (const adv of ecoList) {
         if (!adv || !adv.name || adv.name.toLowerCase() !== depLower) continue;
@@ -286,6 +480,7 @@ export function scanWorkspaceDependencies(options: {
         emitted.add(dedupKey);
 
         const tags: string[] = [];
+        if (hasAnyImports) tags.push(isReachable ? 'REACHABLE' : 'INSTALLED');
         if (adv.kev) tags.push('CISA KEV');
         if (typeof adv.epss === 'number' && adv.epss > 0) tags.push(`EPSS ${(adv.epss * 100).toFixed(1)}%`);
         const tagSuffix = tags.length > 0 ? ` [${tags.join(', ')}]` : '';
@@ -309,7 +504,8 @@ export function scanWorkspaceDependencies(options: {
           packageName: dep.name,
           fixedVersion: adv.lt,
           kev: Boolean(adv.kev),
-          epss: typeof adv.epss === 'number' ? adv.epss : undefined
+          epss: typeof adv.epss === 'number' ? adv.epss : undefined,
+          reachable: hasAnyImports ? isReachable : undefined
         });
       }
     }

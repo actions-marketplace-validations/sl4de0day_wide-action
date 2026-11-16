@@ -1,5 +1,7 @@
 import * as core from '@actions/core';
 import * as github from '@actions/github';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { getConfig } from './config.js';
 import { getPullRequestDiff, getLocalGitDiff } from './git.js';
 import { SecurityScanner } from './engine/scanner.js';
@@ -36,6 +38,21 @@ async function runWithConcurrency<T>(
       }
     })
   );
+}
+
+function readSurroundingContext(workspaceDir: string, relFile: string, lineNum: number, radius = 20): string {
+  try {
+    const content = readFileSync(resolve(workspaceDir, relFile), 'utf8');
+    const lines = content.split(/\r?\n/);
+    const start = Math.max(0, lineNum - 1 - radius);
+    const end = Math.min(lines.length, lineNum + radius);
+    return lines
+      .slice(start, end)
+      .map((l, idx) => `${start + idx + 1}: ${l}`)
+      .join('\n');
+  } catch {
+    return '';
+  }
 }
 
 export async function run(): Promise<void> {
@@ -118,9 +135,14 @@ export async function run(): Promise<void> {
 
       await runWithConcurrency(sastFindingsForAi, REMEDIATION_CONCURRENCY, async finding => {
         try {
-          const patch = await remediationEngine.generatePatch(finding, '', agentRules);
-          if (patch) {
-            finding.suggestedPatch = patch;
+          const surrounding = readSurroundingContext(process.cwd(), finding.file, finding.line);
+          const triage = await remediationEngine.analyzeAndRemediate(finding, surrounding, agentRules);
+          if (triage.verdict) {
+            finding.triageVerdict = triage.verdict;
+            finding.triageReason = triage.reason;
+          }
+          if (triage.patch) {
+            finding.suggestedPatch = triage.patch;
             core.info(`Generated AI fix for ${finding.file}:${finding.line} (${finding.ruleId})`);
           }
         } catch (err) {

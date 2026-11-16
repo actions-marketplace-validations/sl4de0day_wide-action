@@ -64,6 +64,11 @@ export function formatInlineComment(finding: VulnerabilityFinding): string {
     ''
   ];
 
+  if (finding.triageVerdict) {
+    lines.push(`**AI Triage:** \`${finding.triageVerdict}\`${finding.triageReason ? ` — ${finding.triageReason}` : ''}`);
+    lines.push('');
+  }
+
   if (finding.snippet) {
     lines.push('**Vulnerable Line:**');
     lines.push('```');

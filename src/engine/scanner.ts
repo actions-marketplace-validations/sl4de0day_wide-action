@@ -1,7 +1,9 @@
 import { readFileSync, existsSync, readdirSync, statSync } from 'node:fs';
 import { resolve, relative, extname, join, basename } from 'node:path';
 import { SECURITY_RULES, SecurityRule } from './rules.js';
-import { scanWorkspaceDependencies } from './sca.js';
+import { collectImportedPackagesFromContent, scanWorkspaceDependencies } from './sca.js';
+import { analyzeProjectFlows, buildLogicalSpans } from './taint.js';
+import { isLikelyRealSecret } from './secrets.js';
 import {
   ScanResult,
   ScanOptions,
@@ -68,7 +70,9 @@ const EXTENSION_LANGS: Record<string, readonly string[]> = {
   '.sql': ['sql'],
   '.json': ['json'],
   '.yaml': ['yaml', 'yml'],
-  '.yml': ['yml', 'yaml']
+  '.yml': ['yml', 'yaml'],
+  '.tf': ['tf', 'hcl'],
+  '.tfvars': ['tf', 'hcl']
 };
 
 const SEVERITY_RANKS: Record<SeverityLevel, number> = {
@@ -109,6 +113,8 @@ export class SecurityScanner {
     const activeRules = rawRules.filter((r) => !AGENT_BEHAVIOR_ONLY_RULE_IDS.has(r.id));
     const findings: VulnerabilityFinding[] = [];
     const rulesByLangKey = new Map<string, SecurityRule[]>();
+    const collectedSources: Array<{ file: string; lang: string; content: string }> = [];
+    const importedPackages = new Set<string>();
     let scannedFilesCount = 0;
 
     if (options.onlyDiff) {
@@ -119,7 +125,7 @@ export class SecurityScanner {
           if (!this.isScannableRelativePath(normalizedRel)) continue;
 
           const fullPath = resolve(this.workspaceDir, normalizedRel);
-          if (this.scanSingleFile(fullPath, normalizedRel, changedLines, minRank, activeRules, rulesByLangKey, findings)) {
+          if (this.scanSingleFile(fullPath, normalizedRel, changedLines, minRank, activeRules, rulesByLangKey, findings, collectedSources, importedPackages)) {
             scannedFilesCount++;
           }
         }
@@ -128,9 +134,30 @@ export class SecurityScanner {
       const allFiles = this.collectWorkspaceFiles(this.workspaceDir);
       for (const fullPath of allFiles) {
         const relPath = relative(this.workspaceDir, fullPath).replace(/\\/g, '/');
-        if (this.scanSingleFile(fullPath, relPath, undefined, minRank, activeRules, rulesByLangKey, findings)) {
+        if (this.scanSingleFile(fullPath, relPath, undefined, minRank, activeRules, rulesByLangKey, findings, collectedSources, importedPackages)) {
           scannedFilesCount++;
         }
+      }
+    }
+
+    if (collectedSources.length > 0) {
+      const flowFindings = analyzeProjectFlows(collectedSources);
+      for (const flow of flowFindings) {
+        if (SEVERITY_RANKS[flow.severity] < minRank) continue;
+        if (options.onlyDiff && options.modifiedFiles) {
+          const changed = options.modifiedFiles.get(flow.file);
+          if (!changed) continue;
+          const end = flow.endLine || flow.line;
+          let touchesDiff = false;
+          for (let ln = flow.line; ln <= end; ln++) {
+            if (changed.has(ln)) {
+              touchesDiff = true;
+              break;
+            }
+          }
+          if (!touchesDiff) continue;
+        }
+        findings.push(flow);
       }
     }
 
@@ -143,7 +170,8 @@ export class SecurityScanner {
         onlyDiff: options.onlyDiff,
         modifiedFiles: options.modifiedFiles,
         minRank,
-        severityRanks: SEVERITY_RANKS
+        severityRanks: SEVERITY_RANKS,
+        importedPackages: !options.onlyDiff && importedPackages.size > 0 ? importedPackages : undefined
       });
       dedupedFindings.push(...scaFindings);
     }
@@ -216,7 +244,7 @@ export class SecurityScanner {
     const key = langTokens.join(',');
     let cached = rulesByLangKey.get(key);
     if (!cached) {
-      const isDataConfigOnly = langTokens.every((t) => t === 'json' || t === 'yaml' || t === 'yml');
+      const isDataConfigOnly = langTokens.every((t) => ['json', 'yaml', 'yml', 'tf', 'hcl'].includes(t));
       cached = rules.filter((r) => {
         if (SEVERITY_RANKS[r.severity] < minRank) return false;
         if (r.languages.includes('all')) {
@@ -237,7 +265,7 @@ export class SecurityScanner {
     if (trimmed.startsWith('//') || trimmed.startsWith('/*') || trimmed.startsWith('* ') || trimmed === '*' || trimmed.startsWith('<!--')) {
       return true;
     }
-    const usesHashComment = langTokens.some((t) => ['py', 'rb', 'yaml', 'yml', 'ex', 'exs'].includes(t));
+    const usesHashComment = langTokens.some((t) => ['py', 'rb', 'yaml', 'yml', 'ex', 'exs', 'tf', 'hcl'].includes(t));
     if (usesHashComment && trimmed.startsWith('#')) {
       return true;
     }
@@ -251,7 +279,9 @@ export class SecurityScanner {
     minRank: number,
     rules: readonly SecurityRule[],
     rulesByLangKey: Map<string, SecurityRule[]>,
-    findings: VulnerabilityFinding[]
+    findings: VulnerabilityFinding[],
+    collectedSources?: Array<{ file: string; lang: string; content: string }>,
+    importedPackages?: Set<string>
   ): boolean {
     const langTokens = this.resolveLangTokens(fullPath);
     if (!langTokens) return false;
@@ -270,49 +300,86 @@ export class SecurityScanner {
     }
 
     const content = raw.toString('utf8');
+    if (collectedSources && !['json', 'yaml', 'yml', 'tf', 'hcl', 'sql'].includes(langTokens[0])) {
+      collectedSources.push({ file: relPath, lang: langTokens[0], content });
+    }
+    if (importedPackages) {
+      collectImportedPackagesFromContent(content, importedPackages);
+    }
+
     const lines = content.split('\n');
+    const fileHead = lines.slice(0, Math.min(lines.length, 15)).join('\n');
     const applicableRules = this.getRulesForLanguage(langTokens, minRank, rules, rulesByLangKey);
+    const spans = buildLogicalSpans(lines);
+    const seenLineRule = new Set<string>();
+
+    const evaluateCandidate = (text: string, lineIdx: number, endLineNum: number) => {
+      const lineNum = lineIdx + 1;
+      const windowSlice = lines.slice(Math.max(0, lineIdx - 5), Math.min(lines.length, lineIdx + 6)).join('\n');
+      for (const rule of applicableRules) {
+        if (!rule.pattern.test(text)) continue;
+        if (rule.notMatch) {
+          if (rule.notMatch.test(text)) continue;
+          if ((rule.id.startsWith('wide/xxe-') || rule.id.startsWith('wide/client-crypto-')) && (rule.notMatch.test(windowSlice) || rule.notMatch.test(fileHead))) {
+            continue;
+          }
+        }
+        if (rule.category === 'SECRETS' && !isLikelyRealSecret(text, relPath)) {
+          continue;
+        }
+        if (rule.sourcePattern) {
+          const windowStart = Math.max(0, lineIdx - 15);
+          const windowText = lines.slice(windowStart, lineIdx + 1).join('\n');
+          if (!rule.sourcePattern.test(windowText)) continue;
+        }
+        const key = `${lineNum}:${rule.id}`;
+        if (seenLineRule.has(key)) continue;
+        seenLineRule.add(key);
+
+        findings.push({
+          id: `${rule.id}-${relPath}-${lineNum}`,
+          ruleId: rule.id,
+          cwe: rule.cwe,
+          title: rule.category,
+          description: rule.message,
+          severity: rule.severity,
+          file: relPath,
+          line: lineNum,
+          ...(endLineNum > lineNum ? { endLine: endLineNum } : {}),
+          snippet: lines[lineIdx].trim(),
+          remediation: rule.remediation,
+          source: 'sast'
+        });
+      }
+    };
 
     for (let i = 0; i < lines.length; i++) {
       const lineNum = i + 1;
-
-      if (changedLines && !changedLines.has(lineNum)) {
-        continue;
-      }
-
+      if (changedLines && !changedLines.has(lineNum)) continue;
       const lineText = lines[i];
       if (lineText.length > MAX_LINE_LENGTH) continue;
       if (/\bwide-ignore\b/i.test(lineText)) continue;
       if (i > 0 && /\bwide-ignore-next-line\b/i.test(lines[i - 1])) continue;
       if (this.isCommentOnlyLine(lineText, langTokens)) continue;
+      evaluateCandidate(lineText, i, lineNum);
+    }
 
-      for (const rule of applicableRules) {
-        if (rule.pattern.test(lineText)) {
-          if (rule.notMatch && rule.notMatch.test(lineText)) continue;
-          let confirmed = true;
-          if (rule.sourcePattern) {
-            const windowStart = Math.max(0, i - 15);
-            const windowText = lines.slice(windowStart, i + 1).join('\n');
-            confirmed = rule.sourcePattern.test(windowText);
-          }
-
-          if (confirmed) {
-            findings.push({
-              id: `${rule.id}-${relPath}-${lineNum}`,
-              ruleId: rule.id,
-              cwe: rule.cwe,
-              title: rule.category,
-              description: rule.message,
-              severity: rule.severity,
-              file: relPath,
-              line: lineNum,
-              snippet: lineText.trim(),
-              remediation: rule.remediation,
-              source: 'sast'
-            });
+    for (const span of spans) {
+      if (span.endLine <= span.startLine) continue;
+      const startIdx = span.startLine - 1;
+      if (/\bwide-ignore\b/i.test(lines[startIdx] || '')) continue;
+      if (startIdx > 0 && /\bwide-ignore-next-line\b/i.test(lines[startIdx - 1] || '')) continue;
+      if (changedLines) {
+        let touches = false;
+        for (let ln = span.startLine; ln <= span.endLine; ln++) {
+          if (changedLines.has(ln)) {
+            touches = true;
+            break;
           }
         }
+        if (!touches) continue;
       }
+      evaluateCandidate(span.text, startIdx, span.endLine);
     }
     return true;
   }

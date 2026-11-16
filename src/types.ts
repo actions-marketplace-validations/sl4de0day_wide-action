@@ -31,11 +31,15 @@ export interface VulnerabilityFinding {
   cwe?: string;
   remediation?: string;
   suggestedPatch?: string;
-  source?: 'sast' | 'sca';
+  source?: 'sast' | 'sca' | 'taint';
   packageName?: string;
   fixedVersion?: string;
   kev?: boolean;
   epss?: number;
+  crossFile?: boolean;
+  reachable?: boolean;
+  triageVerdict?: 'EXPLOITABLE' | 'MITIGATED' | 'FALSE_POSITIVE';
+  triageReason?: string;
 }
 
 export interface ScanSummary {

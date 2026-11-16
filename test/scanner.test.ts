@@ -184,4 +184,56 @@ describe('SecurityScanner Engine', () => {
     assert.equal(res.totalFilesScanned, 0);
     assert.equal(res.findings.length, 0);
   });
+
+  it('detects multi-line and cross-file taint flows, filters placeholder secrets, and evaluates lockfile SCA reachability', async () => {
+    const deepDir = join(tmpDir, 'deep_test');
+    mkdirSync(join(deepDir, '.github', 'workflows'), { recursive: true });
+    writeFileSync(
+      join(deepDir, 'sink.ts'),
+      'export function runLookup(db: any, userId: string) {\n  return db.query(\n    "SELECT * FROM users WHERE name = \'" +\n    userId\n  );\n}\n',
+      'utf8'
+    );
+    writeFileSync(
+      join(deepDir, 'routes.ts'),
+      'import express from "express";\nimport { runLookup } from "./sink.js";\nexport function handler(req: any, db: any) {\n  const raw = req.query.q;\n  return runLookup(db, raw);\n}\nexport const SAFE_PLACEHOLDER = "EXAMPLE_YOUR_API_KEY_HERE";\nexport const LEAKED = "ghp_9xK2mP7qR4tV8wZ1aB3cD5eF6gH8jL0nM2q";\n',
+      'utf8'
+    );
+    writeFileSync(
+      join(deepDir, '.github', 'workflows', 'pr.yml'),
+      'on: pull_request_target\nsteps:\n  - uses: actions/checkout@v4\n    with:\n      ref: ${{ github.event.pull_request.head.sha }}\n',
+      'utf8'
+    );
+    writeFileSync(
+      join(deepDir, 'main.tf'),
+      'resource "aws_s3_bucket_acl" "b" {\n  acl = "public-read"\n}\n',
+      'utf8'
+    );
+    writeFileSync(join(deepDir, 'yarn.lock'), '"express@^4.17.0":\n  version "4.17.1"\n', 'utf8');
+    writeFileSync(join(deepDir, 'Cargo.lock'), '[[package]]\nname = "serde_yaml"\nversion = "0.9.10"\n', 'utf8');
+
+    const advs = {
+      npm: [{ name: 'express', le: '4.17.1', id: 'CVE-2024-9991', cwe: 'CWE-601', sev: 'HIGH', note: 'open redirect' }],
+      cargo: [{ name: 'serde_yaml', lt: '0.9.20', id: 'CVE-2024-9992', cwe: 'CWE-502', sev: 'CRITICAL', note: 'unsafe yaml' }]
+    };
+
+    const scanner = new SecurityScanner(deepDir);
+    const res = await scanner.scan({ onlyDiff: false, sca: true, advisories: advs });
+
+    const crossFlow = res.findings.find(f => f.crossFile === true && f.file === 'routes.ts');
+    assert.ok(crossFlow, 'Expected cross-file taint flow finding on routes.ts');
+    assert.equal(crossFlow.cwe, 'CWE-89');
+
+    const ciHit = res.findings.find(f => f.ruleId === 'wide/cicd-gha-pull-request-target-checkout');
+    assert.ok(ciHit, 'Expected CI/CD workflow rule hit');
+
+    const tfHit = res.findings.find(f => f.ruleId === 'wide/iac-terraform-public-ingress');
+    assert.ok(tfHit, 'Expected Terraform public ACL hit');
+
+    const expressSca = res.findings.find(f => f.source === 'sca' && f.packageName === 'express');
+    const cargoSca = res.findings.find(f => f.source === 'sca' && f.packageName === 'serde_yaml');
+    assert.ok(expressSca && expressSca.reachable === true && expressSca.description.includes('[REACHABLE'));
+    assert.ok(cargoSca && cargoSca.reachable === false && cargoSca.description.includes('[INSTALLED'));
+
+    assert.equal(res.findings.some(f => f.snippet?.includes('EXAMPLE_YOUR_API_KEY_HERE')), false);
+  });
 });

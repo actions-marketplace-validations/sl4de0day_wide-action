@@ -131,4 +131,28 @@ describe('AI Remediation Engine', () => {
       globalThis.fetch = origFetch;
     }
   });
+
+  it('parses structured AI triage verdicts and avoids patching mitigated or false-positive findings', () => {
+    const engine = new RemediationEngine({ provider: 'gemini', apiKey: 'test' });
+    const exploitable = engine.parseTriageResponse(
+      [
+        'VERDICT: EXPLOITABLE',
+        'REASON: User query input reaches pool.query without parameterization.',
+        '```suggestion',
+        'const q = await pool.query("SELECT * FROM users WHERE id = $1", [id]);',
+        '```'
+      ].join('\n'),
+      'const q = pool.query("SELECT * FROM users WHERE id = " + id);'
+    );
+    assert.equal(exploitable.verdict, 'EXPLOITABLE');
+    assert.ok(exploitable.reason?.includes('pool.query'));
+    assert.equal(exploitable.patch, 'const q = await pool.query("SELECT * FROM users WHERE id = $1", [id]);');
+
+    const falsePos = engine.parseTriageResponse(
+      'VERDICT: FALSE_POSITIVE\nREASON: Input was coerced via Number() upstream.',
+      'pool.query(sql);'
+    );
+    assert.equal(falsePos.verdict, 'FALSE_POSITIVE');
+    assert.equal(falsePos.patch, null);
+  });
 });
