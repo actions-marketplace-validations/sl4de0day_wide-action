@@ -1,0 +1,49 @@
+name: Sync Wide Rules Bundle
+
+on:
+  repository_dispatch:
+    types: [wide-rules-updated]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync-bundle:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout wide-action
+        uses: actions/checkout@v4
+
+      - name: Checkout upstream wide-rules
+        uses: actions/checkout@v4
+        with:
+          repository: sl4de0day/wide-rules
+          ref: main
+          path: .wide-rules-upstream
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Sync Embedded Bundle, Test, and Rebuild Action
+        env:
+          WIDE_RULES_DIST_DIR: .wide-rules-upstream/dist
+        run: |
+          npm ci
+          npm run sync:bundle
+          rm -rf .wide-rules-upstream
+          npm test
+          npm run build
+
+      - name: Open Pull Request for Updated Bundle
+        uses: peter-evans/create-pull-request@v7
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: "chore(bundle): sync latest wide-rules and OSV advisories"
+          title: "chore(bundle): sync latest rules and OSV advisories"
+          body: "Automated update triggered by wide-rules changes, verified with npm test and npm run build."
+          branch: chore/sync-wide-rules
+          delete-branch: true

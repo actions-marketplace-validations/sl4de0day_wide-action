@@ -64,12 +64,13 @@ function cleanVersionParts(raw: string): number[] {
     });
 }
 
-export function isVersionAffected(version: string, adv: { ge?: string; lt?: string }): boolean {
+export function isVersionAffected(version: string, adv: { ge?: string; lt?: string; le?: string }): boolean {
   if (!version || /^\*|latest|workspace:/i.test(version)) return false;
   if (!/^\d/.test(version.replace(/^[vV^~=<>]+/, ''))) return false;
   if (adv.ge && compareVersions(version, adv.ge) < 0) return false;
   if (adv.lt && compareVersions(version, adv.lt) >= 0) return false;
-  return Boolean(adv.lt || adv.ge);
+  if (adv.le && compareVersions(version, adv.le) > 0) return false;
+  return Boolean(adv.lt || adv.le || adv.ge);
 }
 
 function findLineForToken(lines: string[], token: string, startHint = 0): number {
@@ -301,7 +302,9 @@ export function scanWorkspaceDependencies(options: {
           cwe: adv.cwe || 'CWE-1395',
           remediation: adv.lt
             ? `Upgrade ${dep.name} to version ${adv.lt} or later.`
-            : `Upgrade ${dep.name} to a patched release.`,
+            : adv.le
+              ? `Upgrade ${dep.name} to a version newer than ${adv.le}.`
+              : `Upgrade ${dep.name} to a patched release.`,
           source: 'sca',
           packageName: dep.name,
           fixedVersion: adv.lt,

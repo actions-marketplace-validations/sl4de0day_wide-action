@@ -4,12 +4,15 @@ import { fileURLToPath } from 'node:url';
 
 const currentDir = dirname(fileURLToPath(import.meta.url));
 const rootDir = resolve(currentDir, '..');
-const rulesSrcPath = resolve(rootDir, '../wide-rules/dist/rules.min.json');
-const osvSrcPath = resolve(rootDir, '../wide-rules/dist/osv-bundle.min.json');
+const rulesDistDir = process.env.WIDE_RULES_DIST_DIR
+  ? resolve(rootDir, process.env.WIDE_RULES_DIST_DIR)
+  : resolve(rootDir, '../wide-rules/dist');
+const rulesSrcPath = resolve(rulesDistDir, 'rules.min.json');
+const osvSrcPath = resolve(rulesDistDir, 'osv-bundle.min.json');
 const outPath = resolve(rootDir, 'src/engine/embedded-bundle.ts');
 
 if (!existsSync(rulesSrcPath) || !existsSync(osvSrcPath)) {
-  console.error('Missing ../wide-rules/dist bundles. Run npm run bundle in wide-rules first.');
+  console.error(`Missing rules.min.json or osv-bundle.min.json in ${rulesDistDir}.`);
   process.exit(1);
 }
 
@@ -58,7 +61,8 @@ const output = [
   'export interface EmbeddedAdvisoryEntry {',
   '  readonly name: string;',
   '  readonly ge?: string;',
-  '  readonly lt: string;',
+  '  readonly lt?: string;',
+  '  readonly le?: string;',
   '  readonly id: string;',
   '  readonly ghsaId?: string;',
   '  readonly cve?: string;',

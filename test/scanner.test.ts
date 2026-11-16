@@ -111,6 +111,7 @@ describe('SecurityScanner Engine', () => {
           name: 'demo',
           dependencies: {
             lodash: '4.17.20',
+            minimist: '1.2.5',
             react: '19.0.0'
           }
         },
@@ -124,7 +125,8 @@ describe('SecurityScanner Engine', () => {
 
     const mockAdvisories = {
       npm: [
-        { name: 'lodash', ge: '0.0.0', lt: '4.17.21', id: 'CVE-2021-23337', cwe: 'CWE-78', sev: 'HIGH', note: 'Command injection in lodash', kev: true, epss: 0.72 }
+        { name: 'lodash', ge: '0.0.0', lt: '4.17.21', id: 'CVE-2021-23337', cwe: 'CWE-78', sev: 'HIGH', note: 'Command injection in lodash', kev: true, epss: 0.72 },
+        { name: 'minimist', ge: '1.0.0', le: '1.2.5', id: 'CVE-2021-44906', cwe: 'CWE-1321', sev: 'CRITICAL', note: 'Prototype pollution inclusive upper bound' }
       ],
       pip: [
         { name: 'pyyaml', lt: '5.4', id: 'CVE-2020-14343', cwe: 'CWE-502', sev: 'CRITICAL', note: 'Arbitrary code execution in PyYAML' }
@@ -137,7 +139,9 @@ describe('SecurityScanner Engine', () => {
     const scanner = new SecurityScanner(scaDir);
     const full = await scanner.scan({ onlyDiff: false, sca: true, advisories: mockAdvisories });
     const scaFull = full.findings.filter(f => f.source === 'sca');
-    assert.equal(scaFull.length, 3);
+    assert.equal(scaFull.length, 4);
+    const minimistHit = scaFull.find(f => f.packageName === 'minimist');
+    assert.ok(minimistHit?.remediation?.includes('newer than 1.2.5'));
     const lodashHit = scaFull.find(f => f.packageName === 'lodash');
     assert.ok(lodashHit);
     assert.equal(lodashHit.kev, true);
