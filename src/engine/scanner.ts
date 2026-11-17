@@ -359,7 +359,7 @@ export class SecurityScanner {
       const lineText = lines[i];
       if (lineText.length > MAX_LINE_LENGTH) continue;
       if (/\bwide-ignore\b/i.test(lineText)) continue;
-      if (i > 0 && /\bwide-ignore-next-line\b/i.test(lines[i - 1])) continue;
+      if (i > 0 && /\bwide-ignore(-next-line)?\b/i.test(lines[i - 1])) continue;
       if (this.isCommentOnlyLine(lineText, langTokens)) continue;
       evaluateCandidate(lineText, i, lineNum);
     }
@@ -368,7 +368,7 @@ export class SecurityScanner {
       if (span.endLine <= span.startLine) continue;
       const startIdx = span.startLine - 1;
       if (/\bwide-ignore\b/i.test(lines[startIdx] || '')) continue;
-      if (startIdx > 0 && /\bwide-ignore-next-line\b/i.test(lines[startIdx - 1] || '')) continue;
+      if (startIdx > 0 && /\bwide-ignore(-next-line)?\b/i.test(lines[startIdx - 1] || '')) continue;
       if (changedLines) {
         let touches = false;
         for (let ln = span.startLine; ln <= span.endLine; ln++) {

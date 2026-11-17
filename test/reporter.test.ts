@@ -63,6 +63,8 @@ describe('Reporter Markdown Generator', () => {
     assert.ok(inlineMd.includes('<div data-wide-action="finding" data-rule-id="WIDE-SEC-001"></div>'));
     assert.ok(inlineMd.includes('const sql = "SELECT * FROM users WHERE id = " + req.query.id;'));
     assert.ok(inlineMd.includes('Use parameterized queries.'));
+    assert.ok(inlineMd.includes('```suggestion'));
+    assert.ok(inlineMd.includes('// wide-ignore [WIDE-SEC-001]'));
   });
 });
 

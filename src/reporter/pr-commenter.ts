@@ -122,12 +122,17 @@ export class PrCommenter {
         }
 
         existingKeys.add(key);
-        newComments.push({
+        const commentItem: any = {
           path: normalizedPath,
-          line: finding.line,
+          line: finding.endLine && finding.endLine > finding.line ? finding.endLine : finding.line,
           side: 'RIGHT',
           body: formatInlineComment(finding)
-        });
+        };
+        if (finding.endLine && finding.endLine > finding.line) {
+          commentItem.start_line = finding.line;
+          commentItem.start_side = 'RIGHT';
+        }
+        newComments.push(commentItem);
       }
 
       if (newComments.length === 0) {

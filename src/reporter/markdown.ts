@@ -54,6 +54,16 @@ export function formatSummaryComment(
   return rows.join('\n');
 }
 
+export function formatQuickFixSuggestion(finding: VulnerabilityFinding): string | null {
+  if (!finding.snippet) return null;
+  const ext = finding.file.split('.').pop()?.toLowerCase() || '';
+  const commentChar = ['py', 'rb', 'sh', 'bash', 'yaml', 'yml', 'dockerfile'].includes(ext) ? '#' : '//';
+  const indentMatch = finding.snippet.match(/^([ \t]*)/);
+  const indent = indentMatch ? indentMatch[1] : '';
+  const ruleId = finding.ruleId || finding.id;
+  return `${indent}${commentChar} wide-ignore [${ruleId}]\n${finding.snippet}`;
+}
+
 export function formatInlineComment(finding: VulnerabilityFinding): string {
   const lines = [
     `### Wide Security: [${finding.severity}] ${finding.title} (${finding.cwe || 'CWE'})`,
@@ -83,6 +93,15 @@ export function formatInlineComment(finding: VulnerabilityFinding): string {
     lines.push(finding.suggestedPatch);
     lines.push('```');
     lines.push('');
+  } else {
+    const quickFix = formatQuickFixSuggestion(finding);
+    if (quickFix) {
+      lines.push('**Quick-Fix Suppression (Click "Commit suggestion" to apply with wide-ignore):**');
+      lines.push('```suggestion');
+      lines.push(quickFix);
+      lines.push('```');
+      lines.push('');
+    }
   }
 
   lines.push('**Recommended Remediation:**');

@@ -22,6 +22,18 @@ export interface TriageAndRemediationResult {
 
 const MIN_PATCH_QUALITY_SCORE = 0.5;
 
+export function alignPatchIndentation(patch: string, originalSnippet: string): string {
+  if (!patch || !originalSnippet) return patch;
+  const indentMatch = originalSnippet.match(/^([ \t]+)/);
+  if (!indentMatch) return patch;
+  const indent = indentMatch[1];
+  const lines = patch.split('\n');
+  if (lines.length > 0 && !lines[0].startsWith(' ') && !lines[0].startsWith('\t')) {
+    return lines.map(line => line.trim().length > 0 ? `${indent}${line}` : line).join('\n');
+  }
+  return patch;
+}
+
 export class RemediationEngine {
   private provider: string;
   private apiKey: string;
@@ -295,6 +307,6 @@ export class RemediationEngine {
         chosen = candidate;
       }
     }
-    return chosen;
+    return chosen ? alignPatchIndentation(chosen, originalSnippet) : null;
   }
 }

@@ -155,4 +155,12 @@ describe('AI Remediation Engine', () => {
     assert.equal(falsePos.verdict, 'FALSE_POSITIVE');
     assert.equal(falsePos.patch, null);
   });
+
+  it('aligns patch indentation to match original snippet indentation', () => {
+    const engine = new RemediationEngine({ provider: 'gemini', apiKey: 'test' });
+    const original = '    const q = "SELECT * FROM users WHERE id = " + id;';
+    const unindentedPatch = 'const q = pool.query("SELECT * FROM users WHERE id = $1", [id]);';
+    const selected = engine.selectBestCandidatePatch([unindentedPatch], original);
+    assert.equal(selected, '    const q = pool.query("SELECT * FROM users WHERE id = $1", [id]);');
+  });
 });
