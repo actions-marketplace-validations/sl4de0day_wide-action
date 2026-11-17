@@ -1,0 +1,94 @@
+name: Release Wide Action
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - package.json
+  workflow_dispatch:
+    inputs:
+      draft:
+        description: 'Create the release as a draft instead of publishing it'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+
+      - name: Detect Version Change
+        id: version
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          CURRENT=$(node -p "require('./package.json').version")
+          echo "version=$CURRENT" >> "$GITHUB_OUTPUT"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          PREVIOUS=$(git show HEAD~1:package.json 2>/dev/null | node -p "JSON.parse(require('fs').readFileSync(0,'utf8')).version" 2>/dev/null || echo "")
+          if [ "$CURRENT" = "$PREVIOUS" ]; then
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            echo "Version unchanged ($CURRENT); skipping release."
+          else
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create Release
+        id: create
+        if: steps.version.outputs.should_release == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+          DRAFT_INPUT: ${{ inputs.draft }}
+          DRAFT_VAR: ${{ vars.WIDE_RELEASE_DRAFT }}
+        run: |
+          TAG="v$VERSION"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; skipping."
+            echo "created=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          DRAFT="false"
+          if [ "$DRAFT_INPUT" = "true" ] || [ "$DRAFT_VAR" = "true" ]; then
+            DRAFT="true"
+          fi
+          FLAGS=(--target "$GITHUB_SHA" --title "Wide Action $VERSION" --generate-notes --latest)
+          if [ "$DRAFT" = "true" ]; then
+            FLAGS+=(--draft)
+          fi
+          gh release create "$TAG" "${FLAGS[@]}"
+          echo "created=true" >> "$GITHUB_OUTPUT"
+          echo "draft=$DRAFT" >> "$GITHUB_OUTPUT"
+
+      - name: Move v1 Tag
+        if: steps.create.outputs.created == 'true' && steps.create.outputs.draft != 'true'
+        run: |
+          git config user.name "wide-release-bot"
+          git config user.email "wide-release-bot@users.noreply.github.com"
+          git tag -f v1 "$GITHUB_SHA"
+          git push origin refs/tags/v1 --force
+
+      - name: Summary
+        if: steps.create.outputs.created == 'true'
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          DRAFT: ${{ steps.create.outputs.draft }}
+        run: |
+          if [ "$DRAFT" = "true" ]; then
+            echo "Draft release v$VERSION created. Open it, tick the Marketplace checkbox, and publish." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Release v$VERSION published. Check the Marketplace listing to see whether it updated automatically." >> "$GITHUB_STEP_SUMMARY"
+          fi
