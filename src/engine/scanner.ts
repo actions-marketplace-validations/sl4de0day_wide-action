@@ -307,7 +307,7 @@ export class SecurityScanner {
       collectImportedPackagesFromContent(content, importedPackages);
     }
 
-    const lines = content.split('\n');
+    const lines = content.split(/\r?\n/);
     const fileHead = lines.slice(0, Math.min(lines.length, 15)).join('\n');
     const applicableRules = this.getRulesForLanguage(langTokens, minRank, rules, rulesByLangKey);
     const spans = buildLogicalSpans(lines);
@@ -347,6 +347,7 @@ export class SecurityScanner {
           line: lineNum,
           ...(endLineNum > lineNum ? { endLine: endLineNum } : {}),
           snippet: lines[lineIdx].trim(),
+          rawSnippet: endLineNum > lineNum ? lines.slice(lineIdx, endLineNum).join('\n') : lines[lineIdx],
           remediation: rule.remediation,
           source: 'sast'
         });

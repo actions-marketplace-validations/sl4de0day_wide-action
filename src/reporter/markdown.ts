@@ -55,13 +55,16 @@ export function formatSummaryComment(
 }
 
 export function formatQuickFixSuggestion(finding: VulnerabilityFinding): string | null {
-  if (!finding.snippet) return null;
+  const source = finding.rawSnippet || finding.snippet;
+  if (!source) return null;
+  if (finding.endLine && finding.endLine > finding.line && !finding.rawSnippet) return null;
   const ext = finding.file.split('.').pop()?.toLowerCase() || '';
   const commentChar = ['py', 'rb', 'sh', 'bash', 'yaml', 'yml', 'dockerfile'].includes(ext) ? '#' : '//';
-  const indentMatch = finding.snippet.match(/^([ \t]*)/);
+  const firstLine = source.split('\n')[0] || '';
+  const indentMatch = firstLine.match(/^([ \t]*)/);
   const indent = indentMatch ? indentMatch[1] : '';
   const ruleId = finding.ruleId || finding.id;
-  return `${indent}${commentChar} wide-ignore [${ruleId}]\n${finding.snippet}`;
+  return `${indent}${commentChar} wide-ignore [${ruleId}]\n${source}`;
 }
 
 export function formatInlineComment(finding: VulnerabilityFinding): string {

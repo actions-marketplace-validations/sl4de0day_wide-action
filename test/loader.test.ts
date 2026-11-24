@@ -65,9 +65,12 @@ describe('Action RuleLoader', () => {
       assert.ok(advisories && typeof advisories === 'object');
       assert.ok(Array.isArray(advisories.npm));
 
-      assert.equal(RuleLoader.sanitizeOutput('Hello 😀⭐ℹ️1️⃣👨‍💻🇷🇺 World', []), 'Hello  World');
+      assert.equal(
+        RuleLoader.sanitizeOutput('Hello \u{1F600}\u2B50\u2139\uFE0F1\uFE0F\u20E3\u{1F468}\u200D\u{1F4BB}\u{1F1F7}\u{1F1FA} World', []),
+        'Hello  World',
+      );
       assert.equal(RuleLoader.sanitizeOutput('Clean 1 + 2 -> 3', loaded), 'Clean 1 + 2 -> 3');
-      assert.equal(RuleLoader.sanitizeOutput('Leaky 🚨', loaded), 'Leaky ');
+      assert.equal(RuleLoader.sanitizeOutput('Leaky \u{1F6A8}', loaded), 'Leaky ');
     } finally {
       rmSync(tmpDir, { recursive: true, force: true });
     }

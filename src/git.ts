@@ -20,6 +20,10 @@ export function parsePatch(patch: string): Set<number> {
   let inHunk = false;
 
   for (const line of lines) {
+    if (line.startsWith('diff --git ')) {
+      inHunk = false;
+      continue;
+    }
     const match = line.match(HUNK_REGEX);
     if (match && match.groups) {
       inHunk = true;
@@ -29,10 +33,10 @@ export function parsePatch(patch: string): Set<number> {
 
     if (!inHunk) continue;
 
-    if (line.startsWith('+') && !line.startsWith('+++')) {
+    if (line.startsWith('+')) {
       changedLines.add(currentNewLine);
       currentNewLine++;
-    } else if (line.startsWith('-') && !line.startsWith('---')) {
+    } else if (line.startsWith('-')) {
       continue;
     } else if (line.startsWith(' ') || line === '') {
       currentNewLine++;

@@ -84,7 +84,7 @@ export class RemediationEngine {
       }
 
       if (!rawResponse) return { patch: null };
-      const parsed = this.parseTriageResponse(rawResponse, finding.snippet || '', agentRules);
+      const parsed = this.parseTriageResponse(rawResponse, finding.rawSnippet || finding.snippet || '', agentRules);
       return parsed;
     } catch (error) {
       core.warning(`AI Remediation error with ${this.provider}: ${String(error)}`);

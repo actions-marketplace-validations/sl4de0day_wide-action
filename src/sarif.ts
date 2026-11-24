@@ -4,7 +4,7 @@ import * as core from '@actions/core';
 import { SECURITY_RULES } from './engine/rules.js';
 import { SeverityLevel, VulnerabilityFinding } from './types.js';
 
-const DEFAULT_ACTION_VERSION = '0.7211126';
+const DEFAULT_ACTION_VERSION = '0.8241126';
 
 function resolveToolVersion(): string {
   const envVersion = process.env.npm_package_version;
@@ -147,6 +147,30 @@ export function generateSarifReport(
   const results: SarifResult[] = [];
 
   for (const finding of findings) {
+    if (!rulesMap.has(finding.ruleId)) {
+      const rawCwe = typeof finding.cwe === 'string' && finding.cwe.trim() ? finding.cwe.trim() : 'N/A';
+      const cweTag = rawCwe.toLowerCase();
+      const titleText = typeof finding.title === 'string' && finding.title.trim() ? finding.title.trim() : 'Security';
+      const descText = typeof finding.description === 'string' ? finding.description : '';
+      const remText = typeof finding.remediation === 'string' ? finding.remediation : '';
+      const srcTag = finding.source || 'sast';
+      rulesMap.set(finding.ruleId, {
+        id: finding.ruleId,
+        name: titleText.replace(/[^a-zA-Z0-9]/g, '') || finding.ruleId.replace(/[^a-zA-Z0-9]/g, ''),
+        shortDescription: { text: titleText },
+        fullDescription: { text: descText },
+        defaultConfiguration: { level: severityToSarifLevel(finding.severity) },
+        help: {
+          text: `${descText}\nRemediation: ${remText}`,
+          markdown: `**${titleText}** (${rawCwe})\n\n${descText}\n\n### Remediation\n${remText}`
+        },
+        properties: {
+          tags: ['security', srcTag, cweTag],
+          precision: 'high',
+          'problem.severity': severityToProblemSeverity(finding.severity)
+        }
+      });
+    }
     const normalizedUri = finding.file.replace(/\\/g, '/');
     const sarifLevel = severityToSarifLevel(finding.severity);
     const maskedSnippet = finding.snippet ? maskSensitiveSnippet(finding.snippet) : undefined;
