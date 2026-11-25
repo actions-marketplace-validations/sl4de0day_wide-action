@@ -105,30 +105,36 @@ export class PrCommenter {
         existingKeys.add(key);
       }
 
-      const newComments: Array<{ path: string; line: number; side: 'RIGHT'; body: string }> = [];
+      const newComments: Array<{ path: string; line: number; side: 'RIGHT'; start_line?: number; start_side?: 'RIGHT'; body: string }> = [];
 
       for (const finding of findings) {
         const normalizedPath = finding.file.replace(/\\/g, '/');
+        const fileChanged = diffLinesMap && diffLinesMap.size > 0 ? diffLinesMap.get(normalizedPath) : undefined;
         if (diffLinesMap && diffLinesMap.size > 0) {
-          const fileChanged = diffLinesMap.get(normalizedPath);
           if (!fileChanged || !fileChanged.has(finding.line)) {
             continue;
           }
         }
-        const key = `${normalizedPath}:${finding.line}:${finding.ruleId}`;
+        const multiLineValid = Boolean(
+          finding.endLine &&
+          finding.endLine > finding.line &&
+          (!fileChanged || fileChanged.has(finding.endLine))
+        );
+        const targetLine = multiLineValid ? (finding.endLine as number) : finding.line;
+        const key = `${normalizedPath}:${targetLine}:${finding.ruleId}`;
 
         if (existingKeys.has(key)) {
           continue;
         }
 
         existingKeys.add(key);
-        const commentItem: any = {
+        const commentItem: { path: string; line: number; side: 'RIGHT'; start_line?: number; start_side?: 'RIGHT'; body: string } = {
           path: normalizedPath,
-          line: finding.endLine && finding.endLine > finding.line ? finding.endLine : finding.line,
+          line: targetLine,
           side: 'RIGHT',
-          body: formatInlineComment(finding)
+          body: formatInlineComment(multiLineValid ? finding : { ...finding, endLine: undefined })
         };
-        if (finding.endLine && finding.endLine > finding.line) {
+        if (multiLineValid) {
           commentItem.start_line = finding.line;
           commentItem.start_side = 'RIGHT';
         }
@@ -166,6 +172,7 @@ export class PrCommenter {
                 path: item.path,
                 line: item.line,
                 side: 'RIGHT',
+                ...(item.start_line ? { start_line: item.start_line, start_side: 'RIGHT' as const } : {}),
                 body: item.body
               }));
             } catch (singleError) {

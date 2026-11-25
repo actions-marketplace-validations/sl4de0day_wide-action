@@ -9,6 +9,7 @@ export interface ManifestDependency {
   name: string;
   version: string;
   line: number;
+  endLine?: number;
   snippet: string;
 }
 
@@ -88,20 +89,30 @@ function findLineForToken(lines: string[], token: string, startHint = 0): number
   return 1;
 }
 
+function findVersionLineNear(lines: string[], startLine: number, version: string, maxLookahead = 25): number {
+  const target = version.toLowerCase();
+  const limit = Math.min(lines.length, Math.max(0, startLine - 1) + maxLookahead);
+  for (let i = Math.max(0, startLine - 1); i < limit; i++) {
+    const low = lines[i].toLowerCase();
+    if (low.includes('version') && low.includes(target)) return i + 1;
+  }
+  return startLine;
+}
+
 export function parseManifestDependencies(filePath: string, content: string): ManifestDependency[] {
   const base = basename(filePath).toLowerCase();
   const lines = content.split(/\r?\n/);
   const deps: ManifestDependency[] = [];
   const seen = new Set<string>();
 
-  const pushDep = (ecosystem: string, name: string, rawVersion: string, line: number, snippet: string) => {
+  const pushDep = (ecosystem: string, name: string, rawVersion: string, line: number, snippet: string, endLine?: number) => {
     const cleanVer = String(rawVersion || '').trim().replace(/^[~^>=<\s]+/, '').split(/\s+/)[0];
     if (!name || !cleanVer || /^\*|latest|workspace:|file:|git\+|https?:/i.test(cleanVer)) return;
     if (!/\d/.test(cleanVer)) return;
     const key = `${ecosystem}:${name.toLowerCase()}@${cleanVer}:${line}`;
     if (seen.has(key)) return;
     seen.add(key);
-    deps.push({ ecosystem, name, version: cleanVer, line, snippet: snippet.trim() });
+    deps.push({ ecosystem, name, version: cleanVer, line, ...(endLine && endLine > line ? { endLine } : {}), snippet: snippet.trim() });
   };
 
   if (base === 'package.json') {
@@ -125,14 +136,16 @@ export function parseManifestDependencies(filePath: string, content: string): Ma
           const pkgName = pkgPath.split('node_modules/').pop();
           if (pkgName && info && typeof info.version === 'string') {
             const ln = findLineForToken(lines, `"${pkgPath}"`);
-            pushDep('npm', pkgName, info.version, ln, lines[ln - 1] || `"${pkgPath}": "${info.version}"`);
+            const vln = findVersionLineNear(lines, ln, info.version);
+            pushDep('npm', pkgName, info.version, ln, lines[vln - 1] || lines[ln - 1] || `"${pkgPath}": "${info.version}"`, vln);
           }
         }
       } else if (lock.dependencies && typeof lock.dependencies === 'object') {
         for (const [pkgName, info] of Object.entries<any>(lock.dependencies)) {
           if (info && typeof info.version === 'string') {
             const ln = findLineForToken(lines, `"${pkgName}"`);
-            pushDep('npm', pkgName, info.version, ln, lines[ln - 1] || `"${pkgName}": "${info.version}"`);
+            const vln = findVersionLineNear(lines, ln, info.version);
+            pushDep('npm', pkgName, info.version, ln, lines[vln - 1] || lines[ln - 1] || `"${pkgName}": "${info.version}"`, vln);
           }
         }
       }
@@ -202,7 +215,7 @@ export function parseManifestDependencies(filePath: string, content: string): Ma
       }
       const vm = /^version\s*=\s*"([^"]+)"/.exec(lines[i].trim());
       if (vm && curName) {
-        pushDep('pip', curName, vm[1], curLine, `${curName} = "${vm[1]}"`);
+        pushDep('pip', curName, vm[1], curLine, `${curName} = "${vm[1]}"`, i + 1);
         curName = '';
       }
     }
@@ -219,7 +232,8 @@ export function parseManifestDependencies(filePath: string, content: string): Ma
           const ver = String(info?.version || '').replace(/^==\s*/, '');
           if (ver) {
             const ln = findLineForToken(lines, `"${name}"`);
-            pushDep('pip', name, ver, ln, lines[ln - 1] || `"${name}": "${ver}"`);
+            const vln = findVersionLineNear(lines, ln, ver);
+            pushDep('pip', name, ver, ln, lines[vln - 1] || lines[ln - 1] || `"${name}": "${ver}"`, vln);
           }
         }
       }
@@ -251,7 +265,7 @@ export function parseManifestDependencies(filePath: string, content: string): Ma
       }
       const vm = /^\s*version\s*=\s*"([^"]+)"/.exec(lines[i]);
       if (vm && curName) {
-        pushDep('cargo', curName, vm[1], curLine, `${curName} = "${vm[1]}"`);
+        pushDep('cargo', curName, vm[1], curLine, `${curName} = "${vm[1]}"`, i + 1);
         curName = '';
       }
     }
@@ -292,7 +306,8 @@ export function parseManifestDependencies(filePath: string, content: string): Ma
       for (const p of pkgs) {
         if (!p?.name || !p?.version) continue;
         const ln = findLineForToken(lines, `"${p.name}"`);
-        pushDep('composer', p.name, String(p.version), ln, lines[ln - 1] || `"${p.name}": "${p.version}"`);
+        const vln = findVersionLineNear(lines, ln, String(p.version));
+        pushDep('composer', p.name, String(p.version), ln, lines[vln - 1] || lines[ln - 1] || `"${p.name}": "${p.version}"`, vln);
       }
     } catch {}
     return deps;
@@ -318,8 +333,9 @@ export function parseManifestDependencies(filePath: string, content: string): Ma
       const version = /<version>\s*([^<\s]+)\s*<\/version>/i.exec(block)?.[1];
       if (groupId && artifactId && version && !version.startsWith('${')) {
         const line = content.slice(0, m.index).split(/\r?\n/).length;
-        pushDep('maven', `${groupId}:${artifactId}`, version, line, `<dependency>${groupId}:${artifactId}:${version}</dependency>`);
-        pushDep('maven', artifactId, version, line, `<dependency>${groupId}:${artifactId}:${version}</dependency>`);
+        const endLine = content.slice(0, m.index + m[0].length).split(/\r?\n/).length;
+        pushDep('maven', `${groupId}:${artifactId}`, version, line, `<dependency>${groupId}:${artifactId}:${version}</dependency>`, endLine);
+        pushDep('maven', artifactId, version, line, `<dependency>${groupId}:${artifactId}:${version}</dependency>`, endLine);
       }
     }
   }
@@ -463,7 +479,17 @@ export function scanWorkspaceDependencies(options: {
     const deps = parseManifestDependencies(target.relPath, content);
 
     for (const dep of deps) {
-      if (target.changedLines && !target.changedLines.has(dep.line)) continue;
+      if (target.changedLines) {
+        const end = dep.endLine && dep.endLine >= dep.line ? dep.endLine : dep.line;
+        let touched = false;
+        for (let ln = dep.line; ln <= end; ln++) {
+          if (target.changedLines.has(ln)) {
+            touched = true;
+            break;
+          }
+        }
+        if (!touched) continue;
+      }
       const ecoList = advisories[dep.ecosystem] || [];
       if (!Array.isArray(ecoList) || ecoList.length === 0) continue;
       const depLower = dep.name.toLowerCase();

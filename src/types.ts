@@ -28,6 +28,7 @@ export interface VulnerabilityFinding {
   endLine?: number;
   column?: number;
   snippet?: string;
+  rawSnippet?: string;
   cwe?: string;
   remediation?: string;
   suggestedPatch?: string;

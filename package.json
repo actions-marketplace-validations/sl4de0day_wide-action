@@ -1,6 +1,6 @@
 {
   "name": "wide-action",
-  "version": "0.7211126",
+  "version": "0.8241126",
   "description": "Wide's security rules as a pull request gate in GitHub CI, with AI-suggested fixes",
   "type": "module",
   "main": "dist/index.js",
